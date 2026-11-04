@@ -255,6 +255,19 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .doc-text { white-space: pre-wrap; font-size: 17px; line-height: 1.6; max-height: 60vh; overflow: auto;
   background: var(--bg); border-radius: var(--radius-s); padding: 16px; margin-bottom: 12px; }
 
+.resume-view { white-space: normal; font-size: 16px; line-height: 1.5; }
+.resume-view p { margin: 0 0 6px; }
+.resume-view .r-name { text-align: center; font-size: 24px; color: var(--accent); margin: 4px 0 6px; }
+.resume-view .r-head { text-align: center; font-weight: 700; }
+.resume-view .r-contact { font-weight: 400; color: var(--muted); font-size: 15px; margin-bottom: 2px; }
+.resume-view .r-sec { font: 700 15px/1.2 var(--font-body); letter-spacing: .04em; color: var(--accent);
+  border-bottom: 1px solid var(--line); padding-bottom: 4px; margin: 18px 0 8px; }
+.resume-view .r-role { display: flex; justify-content: space-between; gap: 4px 12px; flex-wrap: wrap; margin: 12px 0 0; }
+.resume-view .r-role span { color: var(--muted); font-size: 15px; }
+.resume-view .r-title { font-style: italic; color: var(--muted); margin-bottom: 4px; }
+.resume-view ul { margin: 0 0 6px; padding-left: 20px; }
+.resume-view li { margin-bottom: 3px; }
+
 .prose { white-space: pre-wrap; max-width: 68ch; font-size: 18px; line-height: 1.65; overflow-wrap: anywhere; }
 .prose.clamped { max-height: 340px; overflow: hidden; -webkit-mask-image: linear-gradient(#000 70%, transparent); mask-image: linear-gradient(#000 70%, transparent); }
 

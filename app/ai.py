@@ -116,15 +116,43 @@ def fit(resume: str, preferences: str, job) -> dict:
 # ---------- documents ----------
 
 RESUME_SYSTEM = """You are an expert resume writer. You get a candidate's base resume and a target
-job. Produce a tailored resume as clean plain text — no Markdown (no #, no **, no _, no links syntax).
+job. Produce a tailored resume in the exact Markdown structure below — nothing else.
 
-Rules:
-- Never invent employers, titles, dates, certifications or metrics that aren't in the base resume.
-- You MAY reorder, re-emphasise and reword existing bullets to mirror the job's language and
-  priorities, choose which achievements to foreground, and rewrite the summary for this role.
-- Section headers in plain text on their own line (e.g. "Experience", "Education").
-- Bullets start with "- ".
-- Keep it to about two pages of content at most; cut the least relevant bullets first.
+# Full Name
+email | phone | city | website
+Headline 1 | Headline 2 | Headline 3
+
+## Professional Summary
+One paragraph, 3–5 sentences, written for this role.
+
+## Core Capabilities
+- **Group name:** item, item, item
+
+## Professional Experience
+### Company | Month YYYY – Month YYYY
+**Job Title — Team or Department**
+- Achievement bullet
+- Achievement bullet
+
+## Certifications & Education
+- **Certifications:** ...
+- **Education:** ...
+
+## Tools & Technology
+Comma-separated list.
+
+Hard rules:
+- ROLE ORDER IS FIXED: list every role in reverse chronological order (most recent first),
+  with the same companies, titles and dates as the base resume. Never move a role up or down
+  because it is more relevant, and never drop a role. Older roles may be shortened to 1–2 bullets.
+- Within a role you MAY reorder, reword and trim bullets to mirror the job's language and
+  priorities. You MAY rewrite the summary, headlines and capability groups for this role.
+- Never invent employers, titles, dates, certifications, tools or metrics.
+- Write past roles in past tense and the current role (end date "Present") in present tense.
+- Use only the markers shown: #, ##, ###, "- " bullets and **bold**. No tables, no horizontal
+  rules, no decorative symbols (❖ ▪ • ★ etc.) — remove any that appear in the base resume.
+- Contact and headline lines separate items with " | ".
+- Keep it to about two pages; cut the least relevant bullets first.
 - Output ONLY the resume."""
 
 COVER_SYSTEM = """You are an expert cover letter writer. You get a candidate's resume and a target
@@ -144,7 +172,10 @@ def tailor_resume(resume: str, job, extra: str = "") -> str:
     user = f"BASE RESUME:\n{resume}\n\nTARGET JOB:\n{_job_block(job)}"
     if extra.strip():
         user += f"\n\nEXTRA INSTRUCTIONS FROM THE CANDIDATE:\n{extra}"
-    return _ask(RESUME_SYSTEM, user, max_tokens=4000)
+    from .resume_format import sort_experience
+    out = _ask(RESUME_SYSTEM, user, max_tokens=4000)
+    out = re.sub(r"^```(?:markdown|md)?\s*|\s*```$", "", out.strip())
+    return sort_experience(out)
 
 
 def cover_letter(resume: str, job, extra: str = "") -> str:

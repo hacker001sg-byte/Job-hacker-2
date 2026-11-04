@@ -542,13 +542,49 @@ function drawFit(j) {
   });
 }
 
+// Resumes come back as light Markdown (#, ##, ###, "- ", **bold**).
+const isMd = (t) => /^#{1,3}\s/m.test(t || "");
+function inline(t) { return esc(t).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>"); }
+function mdToHtml(md) {
+  const out = [];
+  let list = false, head = 0;
+  const close = () => { if (list) { out.push("</ul>"); list = false; } };
+  for (const raw of md.split("\n")) {
+    const l = raw.trimEnd();
+    if (!l.trim()) { close(); continue; }
+    let m;
+    if ((m = l.match(/^# (.*)/))) { close(); out.push(`<h3 class="r-name">${inline(m[1])}</h3>`); head = 1; }
+    else if ((m = l.match(/^## (.*)/))) { close(); head = 0; out.push(`<h4 class="r-sec">${inline(m[1])}</h4>`); }
+    else if ((m = l.match(/^### (.*)/))) {
+      close();
+      const i = m[1].lastIndexOf(" | ");
+      out.push(i > 0 ? `<p class="r-role"><strong>${inline(m[1].slice(0, i))}</strong><span>${inline(m[1].slice(i + 3))}</span></p>` : `<p class="r-role"><strong>${inline(m[1])}</strong></p>`);
+    }
+    else if ((m = l.match(/^\s*[-*]\s+(.*)/))) { if (!list) { out.push("<ul>"); list = true; } out.push(`<li>${inline(m[1])}</li>`); }
+    else if (head && head < 3) { out.push(`<p class="r-head${head === 1 ? " r-contact" : ""}">${inline(l)}</p>`); head++; }
+    else if (/^\*\*.+\*\*$/.test(l.trim())) { close(); out.push(`<p class="r-title">${esc(l.trim().replace(/^\*\*|\*\*$/g, ""))}</p>`); }
+    else { close(); out.push(`<p>${inline(l)}</p>`); }
+  }
+  close();
+  return out.join("");
+}
+function toPlain(md) {
+  return md.split("\n").map((l) => {
+    if (l.startsWith("# ")) return l.slice(2);
+    if (l.startsWith("## ")) return "\n" + l.slice(3).toUpperCase();
+    if (l.startsWith("### ")) return "\n" + l.slice(4);
+    if (/^\s*[-*]\s+/.test(l)) return "• " + l.replace(/^\s*[-*]\s+/, "");
+    return l;
+  }).join("\n").replace(/\*\*(.+?)\*\*/g, "$1").replace(/\n{3,}/g, "\n\n").trim();
+}
+
 function drawDocs(docs, openId) {
   const box = document.getElementById("docs");
   box.innerHTML = docs.map((d) => html`
     <details class="doc" data-doc="${d.id}" ${d.id === openId ? "open" : ""}>
       <summary><span><span class="t">${d.kind === "resume" ? "Tailored resume" : "Cover letter"}</span><br><span class="m">${longDate(d.created_at)}${d.persona_name ? `, from ${d.persona_name}` : ""}</span></span>${raw(icon.down)}</summary>
       <div class="doc-body">
-        <div class="doc-text">${d.content}</div>
+        ${isMd(d.content) ? raw(html`<div class="doc-text resume-view">${raw(mdToHtml(d.content))}</div>`) : raw(html`<div class="doc-text">${d.content}</div>`)}
         <div class="row">
           <button class="btn btn-primary" data-act="copy">Copy text</button>
           <a class="btn" href="/api/documents/${d.id}/docx" download>Download Word</a>
@@ -561,7 +597,7 @@ function drawDocs(docs, openId) {
     const id = Number(el.dataset.doc);
     const d = docs.find((x) => x.id === id);
     el.querySelector("[data-act=copy]").addEventListener("click", async () => {
-      try { await navigator.clipboard.writeText(d.content); toast("Copied"); }
+      try { await navigator.clipboard.writeText(isMd(d.content) ? toPlain(d.content) : d.content); toast("Copied"); }
       catch { toast("Couldn't copy. Select the text and copy it instead.", "error"); }
     });
     el.querySelector("[data-act=del]").addEventListener("click", async () => {
@@ -582,6 +618,7 @@ function drawDocs(docs, openId) {
       e.target.dataset.editing = "1";
       e.target.textContent = "Save changes";
       text.innerHTML = html`<textarea class="tall" aria-label="Document text">${d.content}</textarea>`;
+      text.classList.remove("resume-view");
       text.style.padding = "0"; text.style.background = "none"; text.style.maxHeight = "none";
     });
   });

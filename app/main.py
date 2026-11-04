@@ -493,7 +493,7 @@ def download_docx(doc_id: int, user: User = Depends(current_user), db: Session =
     j = d.job
     slug = re.sub(r"[^A-Za-z0-9]+", "-", f"{user.name} {d.kind.replace('_', ' ')} {j.company or ''} {j.title}").strip("-")[:90]
     return Response(
-        to_docx(d.content),
+        to_docx(d.content, d.kind),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": f'attachment; filename="{slug}.docx"'},
     )
