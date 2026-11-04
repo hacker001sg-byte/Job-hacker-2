@@ -319,6 +319,35 @@ code { font-size: 15px; background: var(--soft); padding: 2px 6px; border-radius
 .login h1 { margin-bottom: 8px; }
 .login p { color: var(--muted); }
 
+/* ---------- AI waiting card ---------- */
+.aiwait {
+  position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: var(--gutter);
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+  opacity: 0; transition: opacity .2s;
+}
+.aiwait.show { opacity: 1; }
+body.waiting { overflow: hidden; }
+.aiwait-card {
+  width: min(100%, 420px); text-align: center; padding: 28px 24px 24px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 20px;
+  box-shadow: 0 12px 40px rgb(0 0 0 / .14);
+}
+.aiwait-card h2 { margin: 16px 0 8px; }
+.aiwait-detail { color: var(--muted); margin: 0 auto 14px; max-width: 34ch; }
+.aiwait-time { font: 700 20px/1 var(--font-head); font-variant-numeric: tabular-nums; margin: 0; }
+.aiwait-typ { font: 400 16px var(--font-body); color: var(--muted); }
+.aiwait-slow { color: var(--st-offer); font-weight: 700; font-size: 16px; margin: 14px 0 0; }
+.donut { width: 80px; height: 80px; display: block; margin: 0 auto; stroke: none; animation: spin 1.1s linear infinite; }
+.donut circle { fill: none; stroke-width: 9; }
+.donut-track { stroke: var(--soft); }
+.donut-arc { stroke: var(--accent); stroke-linecap: round; stroke-dasharray: 60 201; transform-origin: 40px 40px; animation: donut-dash 1.6s ease-in-out infinite; }
+@keyframes donut-dash { 0%, 100% { stroke-dasharray: 30 201; } 50% { stroke-dasharray: 120 201; } }
+@media (prefers-reduced-motion: reduce) {
+  /* keep a slow, steady turn so it still reads as "working" */
+  .donut { animation: spin 3s linear infinite !important; }
+}
+
 /* ---------- toast ---------- */
 #toast {
   position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); z-index: 20;

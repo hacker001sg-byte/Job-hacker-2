@@ -94,6 +94,49 @@ function busy(btn, label) {
   return () => { btn.disabled = false; btn.innerHTML = old; };
 }
 
+// Full-screen "working" card for AI calls, so a slow request never looks like a crash.
+// Shows a spinning donut, what's happening, a typical duration and a live timer.
+function aiWait(title, detail, typical) {
+  const el = document.createElement("div");
+  el.className = "aiwait";
+  el.setAttribute("role", "status");
+  el.setAttribute("aria-live", "polite");
+  el.innerHTML = html`
+    <div class="aiwait-card">
+      <svg class="donut" viewBox="0 0 80 80" aria-hidden="true">
+        <circle class="donut-track" cx="40" cy="40" r="32"/>
+        <circle class="donut-arc" cx="40" cy="40" r="32"/>
+      </svg>
+      <h2>${title}</h2>
+      <p class="aiwait-detail">${detail}</p>
+      <p class="aiwait-time"><span id="aw-clock">0:00</span><span class="aiwait-typ">${typical ? ` · usually ${typical}` : ""}</span></p>
+      <p class="aiwait-slow" hidden>Taking longer than usual. Still waiting for Claude, so keep this open.</p>
+    </div>`;
+  document.body.append(el);
+  document.body.classList.add("waiting");
+  const t0 = Date.now();
+  const clock = el.querySelector("#aw-clock");
+  const slow = el.querySelector(".aiwait-slow");
+  const timer = setInterval(() => {
+    const s = Math.floor((Date.now() - t0) / 1000);
+    clock.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+    if (s >= 90) slow.hidden = false;
+  }, 250);
+  requestAnimationFrame(() => el.classList.add("show"));
+  return () => {
+    clearInterval(timer);
+    document.body.classList.remove("waiting");
+    el.classList.remove("show");
+    setTimeout(() => el.remove(), 200);
+  };
+}
+
+// Run an AI request with the waiting card up; always takes it down again.
+async function withAI(opts, fn) {
+  const stop = aiWait(opts.title, opts.detail, opts.typical);
+  try { return await fn(); } finally { stop(); }
+}
+
 function setView(markup) {
   $main.innerHTML = markup;
   $main.firstElementChild?.classList.add("view-enter");
@@ -326,7 +369,10 @@ function showMode(mode, { url = "", auto = false, note = "" } = {}) {
       e.preventDefault();
       const done = busy(e.submitter, "Reading the post");
       try {
-        const r = await api("/extract/text", { json: { text: form.text.value, url: form.url.value } });
+        const r = state.session.ai_enabled
+          ? await withAI({ title: "Reading the job post", detail: "Claude is picking out the title, company, salary and description from your paste.", typical: "10–30 seconds" },
+              () => api("/extract/text", { json: { text: form.text.value, url: form.url.value } }))
+          : await api("/extract/text", { json: { text: form.text.value, url: form.url.value } });
         showReview(r.draft, r.method === "AI" ? "Filled in by AI from your paste. Check it over." : (r.note || "Fill in the title and company."));
       } catch (err) { toast(err.message, "error"); done(); }
     });
@@ -496,7 +542,10 @@ async function fetchLink(url, btn) {
   if (!url) return;
   const done = busy(btn, "Reading the page");
   try {
-    const r = await api("/extract/url", { json: { url } });
+    const r = await withAI({ title: "Reading the job page", detail: state.session.ai_enabled
+        ? "Opening the link and looking for the job details. If the page doesn't list them clearly, Claude reads it."
+        : "Opening the link and looking for the job details.", typical: "5–30 seconds" },
+      () => api("/extract/url", { json: { url } }));
     if (r.existing_id) {
       document.getElementById("add-body").innerHTML = html`
         <div class="callout info"><p><strong>Already saved.</strong> ${r.title}${r.company ? ` at ${r.company}` : ""} is in your list.</p></div>
@@ -661,10 +710,13 @@ async function renderJob(id) {
       const kind = b.dataset.gen;
       const done = busy(b, kind === "resume" ? "Tailoring" : "Writing");
       try {
-        const doc = await api(`/jobs/${id}/documents`, { json: {
-          kind, persona_id: Number(document.getElementById("persona")?.value) || null,
-          instructions: document.getElementById("instr").value,
-        } });
+        const doc = await withAI(kind === "resume"
+          ? { title: "Tailoring your resume", detail: `Claude is matching your resume to ${j.title}${j.company ? ` at ${j.company}` : ""} and rewriting the summary and bullets.`, typical: "30–90 seconds" }
+          : { title: "Writing your cover letter", detail: `Claude is writing a letter for ${j.title}${j.company ? ` at ${j.company}` : ""} from your resume.`, typical: "15–45 seconds" },
+          () => api(`/jobs/${id}/documents`, { json: {
+            kind, persona_id: Number(document.getElementById("persona")?.value) || null,
+            instructions: document.getElementById("instr").value,
+          } }));
         j.documents.unshift(doc);
         drawDocs(j.documents, doc.id);
         toast(kind === "resume" ? "Resume ready" : "Cover letter ready");
@@ -694,7 +746,8 @@ function drawFit(j) {
   document.getElementById("dofit").addEventListener("click", async (e) => {
     const done = busy(e.currentTarget, "Checking");
     try {
-      const nj = await api(`/jobs/${j.id}/fit`, { method: "POST" });
+      const nj = await withAI({ title: "Checking your fit", detail: "Claude is comparing the job with your resume and what you're looking for.", typical: "10–30 seconds" },
+        () => api(`/jobs/${j.id}/fit`, { method: "POST" }));
       state.jobs = null;
       drawFit(nj);
     } catch (err) { toast(err.message, "error"); done(); }
