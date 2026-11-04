@@ -1,0 +1,670 @@
+from __future__ import annotations
+
+import csv
+import datetime as dt
+import io
+import json
+import re
+from typing import Optional
+
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from . import ai, auth, config
+from .db import STATUSES, Document, Job, Persona, User, get_db, init_db, now
+from .docx_export import to_docx
+from .scrape import ScrapeError, fetch_job, normalize_url
+
+app = FastAPI(title="Job Hacker", docs_url="/api/docs", openapi_url="/api/openapi.json")
+init_db()
+
+OPEN_PATHS = {"/api/login", "/api/session", "/api/health", "/api/logout"}
+
+
+@app.middleware("http")
+async def guard(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/") and path not in OPEN_PATHS and not auth.is_authed(request):
+        return JSONResponse({"detail": "Log in to continue."}, status_code=401)
+    return await call_next(request)
+
+
+# ---------- helpers ----------
+
+def current_user(request: Request, db: Session = Depends(get_db)) -> User:
+    """Active profile: cookie for the browser, X-User header (name or id) for automations."""
+    want = request.headers.get("x-user") or request.cookies.get("jh_user")
+    u = None
+    if want:
+        u = db.get(User, int(want)) if want.isdigit() else db.query(User).filter(User.name == want).first()
+    return u or db.query(User).order_by(User.id).first()
+
+
+def own_job(job_id: int, user: User, db: Session) -> Job:
+    j = db.get(Job, job_id)
+    if not j or j.user_id != user.id:
+        raise HTTPException(404, "That job isn't in this profile.")
+    return j
+
+
+def find_dupe(db: Session, user: User, url: str, exclude_id: int | None = None) -> Job | None:
+    if not url:
+        return None
+    q = db.query(Job).filter(Job.user_id == user.id, Job.url == url)
+    if exclude_id:
+        q = q.filter(Job.id != exclude_id)
+    return q.first()
+
+
+def default_persona(db: Session, user: User, persona_id: int | None = None) -> Persona | None:
+    q = db.query(Persona).filter(Persona.user_id == user.id)
+    if persona_id:
+        p = q.filter(Persona.id == persona_id).first()
+        if p:
+            return p
+    return q.filter(Persona.is_default.is_(True)).first() or q.order_by(Persona.id).first()
+
+
+def iso(d: dt.datetime | None) -> str | None:
+    return d.isoformat() + "Z" if d else None
+
+
+def job_out(j: Job, full: bool = True) -> dict:
+    d = {
+        "id": j.id, "url": j.url, "title": j.title, "company": j.company, "location": j.location,
+        "salary": j.salary, "employment_type": j.employment_type, "posted_date": j.posted_date,
+        "source": j.source, "status": j.status, "tags": j.tags, "fit_score": j.fit_score,
+        "applied_at": iso(j.applied_at), "created_at": iso(j.created_at), "updated_at": iso(j.updated_at),
+        "has_description": bool(j.description and j.description.strip()),
+    }
+    if full:
+        d.update(
+            description=j.description, notes=j.notes,
+            fit=json.loads(j.fit_json) if j.fit_json else None,
+            documents=[doc_out(x) for x in j.documents],
+        )
+    return d
+
+
+def doc_out(d: Document) -> dict:
+    return {"id": d.id, "job_id": d.job_id, "kind": d.kind, "content": d.content,
+            "persona_name": d.persona_name, "created_at": iso(d.created_at)}
+
+
+def persona_out(p: Persona) -> dict:
+    return {"id": p.id, "name": p.name, "resume_text": p.resume_text, "is_default": p.is_default}
+
+
+# ---------- schemas ----------
+
+class LoginIn(BaseModel):
+    password: str
+
+
+class JobIn(BaseModel):
+    title: str = Field(min_length=1, max_length=300)
+    url: Optional[str] = ""
+    company: str = ""
+    location: str = ""
+    salary: str = ""
+    employment_type: str = ""
+    posted_date: str = ""
+    description: str = ""
+    source: str = "manual"
+    status: str = "saved"
+    tags: str = ""
+    notes: str = ""
+
+
+class JobPatch(BaseModel):
+    title: Optional[str] = None
+    url: Optional[str] = None
+    company: Optional[str] = None
+    location: Optional[str] = None
+    salary: Optional[str] = None
+    employment_type: Optional[str] = None
+    posted_date: Optional[str] = None
+    description: Optional[str] = None
+    status: Optional[str] = None
+    tags: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class UrlIn(BaseModel):
+    url: str
+
+
+class TextIn(BaseModel):
+    text: str
+    url: Optional[str] = ""
+
+
+class GenIn(BaseModel):
+    kind: str  # resume | cover_letter
+    persona_id: Optional[int] = None
+    instructions: str = ""
+
+
+class DocPatch(BaseModel):
+    content: str
+
+
+class PersonaIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    resume_text: str = ""
+
+
+class PersonaPatch(BaseModel):
+    name: Optional[str] = None
+    resume_text: Optional[str] = None
+
+
+class UserIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class UserPatch(BaseModel):
+    name: Optional[str] = None
+    preferences: Optional[str] = None
+
+
+# ---------- session ----------
+
+@app.get("/api/health")
+def health():
+    return {"ok": True}
+
+
+@app.get("/api/session")
+def session_info(request: Request, db: Session = Depends(get_db)):
+    authed = auth.is_authed(request)
+    out = {"auth_required": bool(config.APP_PASSWORD), "logged_in": authed, "ai_enabled": ai.enabled()}
+    if authed:
+        u = current_user(request, db)
+        out["user"] = {"id": u.id, "name": u.name, "preferences": u.preferences}
+        out["users"] = [{"id": x.id, "name": x.name} for x in db.query(User).order_by(User.id)]
+        out["statuses"] = STATUSES
+    return out
+
+
+@app.post("/api/login")
+def login(body: LoginIn, request: Request, response: Response):
+    if not config.APP_PASSWORD:
+        return {"ok": True}
+    if not auth.check_password(body.password):
+        raise HTTPException(401, "That password didn't match.")
+    response.set_cookie(auth.COOKIE, auth.make_token(), max_age=config.SESSION_DAYS * 86400,
+                        httponly=True, samesite="lax", secure=auth.cookie_secure(request))
+    return {"ok": True}
+
+
+@app.post("/api/logout")
+def logout(response: Response):
+    response.delete_cookie(auth.COOKIE)
+    return {"ok": True}
+
+
+# ---------- profiles ----------
+
+@app.post("/api/users")
+def create_user(body: UserIn, response: Response, db: Session = Depends(get_db)):
+    name = body.name.strip()
+    if db.query(User).filter(func.lower(User.name) == name.lower()).first():
+        raise HTTPException(409, f"There's already a profile called {name}.")
+    u = User(name=name)
+    db.add(u)
+    db.commit()
+    response.set_cookie("jh_user", str(u.id), max_age=10 * 365 * 86400, samesite="lax")
+    return {"id": u.id, "name": u.name}
+
+
+@app.post("/api/users/{user_id}/select")
+def select_user(user_id: int, response: Response, db: Session = Depends(get_db)):
+    if not db.get(User, user_id):
+        raise HTTPException(404, "Profile not found.")
+    response.set_cookie("jh_user", str(user_id), max_age=10 * 365 * 86400, samesite="lax")
+    return {"ok": True}
+
+
+@app.patch("/api/me")
+def update_me(body: UserPatch, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if body.name is not None and body.name.strip():
+        clash = db.query(User).filter(func.lower(User.name) == body.name.strip().lower(), User.id != user.id).first()
+        if clash:
+            raise HTTPException(409, "Another profile already uses that name.")
+        user.name = body.name.strip()
+    if body.preferences is not None:
+        user.preferences = body.preferences
+    db.commit()
+    return {"id": user.id, "name": user.name, "preferences": user.preferences}
+
+
+@app.delete("/api/users/{user_id}")
+def delete_user(user_id: int, response: Response, db: Session = Depends(get_db)):
+    if db.query(User).count() <= 1:
+        raise HTTPException(400, "You need at least one profile.")
+    u = db.get(User, user_id)
+    if not u:
+        raise HTTPException(404, "Profile not found.")
+    db.delete(u)
+    db.commit()
+    response.delete_cookie("jh_user")
+    return {"ok": True}
+
+
+# ---------- personas (base resumes) ----------
+
+@app.get("/api/personas")
+def list_personas(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return [persona_out(p) for p in db.query(Persona).filter(Persona.user_id == user.id).order_by(Persona.id)]
+
+
+@app.post("/api/personas")
+def create_persona(body: PersonaIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    first = not db.query(Persona).filter(Persona.user_id == user.id).first()
+    p = Persona(user_id=user.id, name=body.name.strip(), resume_text=body.resume_text, is_default=first)
+    db.add(p)
+    db.commit()
+    return persona_out(p)
+
+
+def _own_persona(pid: int, user: User, db: Session) -> Persona:
+    p = db.get(Persona, pid)
+    if not p or p.user_id != user.id:
+        raise HTTPException(404, "Resume not found.")
+    return p
+
+
+@app.patch("/api/personas/{pid}")
+def update_persona(pid: int, body: PersonaPatch, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    p = _own_persona(pid, user, db)
+    if body.name is not None and body.name.strip():
+        p.name = body.name.strip()
+    if body.resume_text is not None:
+        p.resume_text = body.resume_text
+    db.commit()
+    return persona_out(p)
+
+
+@app.post("/api/personas/{pid}/default")
+def make_default(pid: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    p = _own_persona(pid, user, db)
+    db.query(Persona).filter(Persona.user_id == user.id).update({Persona.is_default: False})
+    p.is_default = True
+    db.commit()
+    return persona_out(p)
+
+
+@app.delete("/api/personas/{pid}")
+def delete_persona(pid: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    p = _own_persona(pid, user, db)
+    was_default = p.is_default
+    db.delete(p)
+    db.commit()
+    if was_default:
+        nxt = db.query(Persona).filter(Persona.user_id == user.id).order_by(Persona.id).first()
+        if nxt:
+            nxt.is_default = True
+            db.commit()
+    return {"ok": True}
+
+
+# ---------- capture ----------
+
+@app.post("/api/extract/url")
+def extract_url(body: UrlIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    url = normalize_url(body.url)
+    if not url:
+        raise HTTPException(400, "Paste a link to a job posting.")
+    dupe = find_dupe(db, user, url)
+    if dupe:
+        return {"existing_id": dupe.id, "title": dupe.title, "company": dupe.company}
+    try:
+        draft, method = fetch_job(body.url)
+    except ScrapeError as e:
+        return JSONResponse({"needs_manual": True, "reason": str(e), "url": url}, status_code=422)
+    draft["url"] = url
+    return {"draft": draft, "method": method}
+
+
+@app.post("/api/extract/text")
+def extract_text(body: TextIn):
+    text = body.text.strip()
+    if len(text) < 40:
+        raise HTTPException(400, "Paste the whole job post, including the description.")
+    url = normalize_url(body.url or "")
+    if ai.enabled():
+        try:
+            d = ai.extract_job(text[:30000])
+            d["url"] = url
+            return {"draft": d, "method": "AI"}
+        except ai.AIError as e:
+            fallback_reason = str(e)
+    else:
+        fallback_reason = "AI is off, so only the description was filled in."
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    return {
+        "draft": {"title": lines[0][:200] if lines else "", "company": "", "location": "", "salary": "",
+                  "employment_type": "", "posted_date": "", "description": text, "url": url},
+        "method": "basic", "note": fallback_reason,
+    }
+
+
+# ---------- jobs ----------
+
+@app.get("/api/jobs")
+def list_jobs(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    jobs = db.query(Job).filter(Job.user_id == user.id).order_by(Job.updated_at.desc()).all()
+    return [job_out(j, full=False) for j in jobs]
+
+
+@app.post("/api/jobs")
+def create_job(body: JobIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Also the endpoint for n8n / Shortcuts (send X-API-Key). If a job with the
+    same link exists, empty fields on it are filled in and it's returned with 200."""
+    url = normalize_url(body.url or "")
+    data = body.model_dump()
+    data["url"] = url or None
+    if data["status"] not in STATUSES:
+        data["status"] = "saved"
+    dupe = find_dupe(db, user, url)
+    if dupe:
+        changed = False
+        for k in ("company", "location", "salary", "employment_type", "posted_date", "description"):
+            if data.get(k) and not getattr(dupe, k):
+                setattr(dupe, k, data[k])
+                changed = True
+        if changed:
+            db.commit()
+        return JSONResponse({**job_out(dupe), "duplicate": True}, status_code=200)
+    j = Job(user_id=user.id, **data)
+    if j.status in ("applied", "interviewing", "offer"):
+        j.applied_at = now()
+    db.add(j)
+    db.commit()
+    db.refresh(j)
+    return JSONResponse(job_out(j), status_code=201)
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return job_out(own_job(job_id, user, db))
+
+
+@app.patch("/api/jobs/{job_id}")
+def update_job(job_id: int, body: JobPatch, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    j = own_job(job_id, user, db)
+    data = body.model_dump(exclude_unset=True)
+    if "url" in data:
+        u = normalize_url(data["url"] or "")
+        if u and find_dupe(db, user, u, exclude_id=j.id):
+            raise HTTPException(409, "Another saved job already has that link.")
+        data["url"] = u or None
+    if "status" in data:
+        if data["status"] not in STATUSES:
+            raise HTTPException(400, f"Status must be one of: {', '.join(STATUSES)}")
+        if data["status"] in ("applied", "interviewing", "offer") and not j.applied_at:
+            j.applied_at = now()
+    if "title" in data and not (data["title"] or "").strip():
+        raise HTTPException(400, "A job needs a title.")
+    for k, v in data.items():
+        setattr(j, k, v if (v is not None or k == "url") else "")
+    db.commit()
+    db.refresh(j)
+    return job_out(j)
+
+
+@app.delete("/api/jobs/{job_id}")
+def delete_job(job_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    db.delete(own_job(job_id, user, db))
+    db.commit()
+    return {"ok": True}
+
+
+# ---------- AI on a job ----------
+
+@app.post("/api/jobs/{job_id}/fit")
+def check_fit(job_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    j = own_job(job_id, user, db)
+    if not (j.description or "").strip():
+        raise HTTPException(400, "Add the job description first, so there's something to compare against.")
+    p = default_persona(db, user)
+    try:
+        result = ai.fit(p.resume_text if p else "", user.preferences, j)
+    except ai.AIError as e:
+        raise HTTPException(502, str(e))
+    j.fit_score = result["score"]
+    j.fit_json = json.dumps(result)
+    db.commit()
+    db.refresh(j)
+    return job_out(j)
+
+
+@app.post("/api/jobs/{job_id}/documents")
+def generate_document(job_id: int, body: GenIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    j = own_job(job_id, user, db)
+    if body.kind not in ("resume", "cover_letter"):
+        raise HTTPException(400, "kind must be resume or cover_letter")
+    if not (j.description or "").strip():
+        raise HTTPException(400, "Add the job description first, so it can be tailored.")
+    p = default_persona(db, user, body.persona_id)
+    if not p or not p.resume_text.strip():
+        raise HTTPException(400, "Add your base resume in Settings first.")
+    try:
+        fn = ai.tailor_resume if body.kind == "resume" else ai.cover_letter
+        text = fn(p.resume_text, j, body.instructions)
+    except ai.AIError as e:
+        raise HTTPException(502, str(e))
+    d = Document(job_id=j.id, kind=body.kind, content=text, persona_name=p.name)
+    db.add(d)
+    db.commit()
+    return doc_out(d)
+
+
+def _own_doc(doc_id: int, user: User, db: Session) -> Document:
+    d = db.get(Document, doc_id)
+    if not d or d.job.user_id != user.id:
+        raise HTTPException(404, "Document not found.")
+    return d
+
+
+@app.patch("/api/documents/{doc_id}")
+def edit_document(doc_id: int, body: DocPatch, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    d = _own_doc(doc_id, user, db)
+    d.content = body.content
+    db.commit()
+    return doc_out(d)
+
+
+@app.delete("/api/documents/{doc_id}")
+def delete_document(doc_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    db.delete(_own_doc(doc_id, user, db))
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/documents/{doc_id}/docx")
+def download_docx(doc_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    d = _own_doc(doc_id, user, db)
+    j = d.job
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", f"{user.name} {d.kind.replace('_', ' ')} {j.company or ''} {j.title}").strip("-")[:90]
+    return Response(
+        to_docx(d.content),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{slug}.docx"'},
+    )
+
+
+# ---------- import / export ----------
+
+OLD_STATUS = {"not started": "saved", "in progress": "applied", "abandon": "closed", "abandoned": "closed",
+              "applied": "applied", "interviewing": "interviewing", "offer": "offer", "closed": "closed",
+              "rejected": "closed", "saved": "saved"}
+
+
+def _map_status(s: str | None) -> str:
+    return OLD_STATUS.get((s or "").strip().lower(), "saved")
+
+
+@app.post("/api/import/csv")
+async def import_csv(file: UploadFile = File(...), user: User = Depends(current_user), db: Session = Depends(get_db)):
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "Save the file as CSV (UTF-8) and try again.")
+    rows = list(csv.DictReader(io.StringIO(text)))
+
+    def col(row, *names):
+        low = {k.strip().lower(): v for k, v in row.items() if k}
+        for n in names:
+            if low.get(n):
+                return low[n].strip()
+        return ""
+
+    added = dupes = invalid = 0
+    for row in rows:
+        url = normalize_url(col(row, "job url", "url", "link"))
+        title = col(row, "job title", "title")
+        if not title:
+            invalid += 1
+            continue
+        if find_dupe(db, user, url):
+            dupes += 1
+            continue
+        db.add(Job(user_id=user.id, url=url or None, title=title,
+                   company=col(row, "company name", "company"), location=col(row, "location"),
+                   posted_date=col(row, "published at", "posted", "date"),
+                   description=col(row, "description", "job description"),
+                   status=_map_status(col(row, "status")), source="csv"))
+        db.flush()
+        added += 1
+    db.commit()
+    return {"rows": len(rows), "added": added, "duplicates": dupes, "skipped": invalid}
+
+
+@app.get("/api/export")
+def export_all(db: Session = Depends(get_db)):
+    out = {"format": "job-hacker", "version": 2, "exported_at": iso(now()), "profiles": []}
+    for u in db.query(User).order_by(User.id):
+        out["profiles"].append({
+            "name": u.name, "preferences": u.preferences,
+            "personas": [{"name": p.name, "resume_text": p.resume_text, "is_default": p.is_default} for p in u.personas],
+            "jobs": [{
+                **{k: getattr(j, k) for k in ("url", "title", "company", "location", "salary", "employment_type",
+                                               "posted_date", "description", "source", "status", "tags", "notes",
+                                               "fit_score", "fit_json")},
+                "applied_at": iso(j.applied_at), "created_at": iso(j.created_at),
+                "documents": [{"kind": d.kind, "content": d.content, "persona_name": d.persona_name,
+                               "created_at": iso(d.created_at)} for d in j.documents],
+            } for j in u.jobs],
+        })
+    stamp = dt.date.today().isoformat()
+    return Response(json.dumps(out, indent=1), media_type="application/json",
+                    headers={"Content-Disposition": f'attachment; filename="job-hacker-backup-{stamp}.json"'})
+
+
+def _parse_dt(s) -> dt.datetime | None:
+    if not s:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(s).replace("Z", "")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+@app.post("/api/import/backup")
+async def import_backup(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    """Restores a backup from this app, or the file made by scripts/export_old_tracker.py.
+    Merges by profile name; skips jobs whose link is already saved."""
+    try:
+        data = json.loads((await file.read()).decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(400, "That isn't a Job Hacker backup file.")
+    if data.get("format") != "job-hacker":
+        raise HTTPException(400, "That isn't a Job Hacker backup file.")
+
+    summary = {"profiles": 0, "jobs": 0, "duplicates": 0, "resumes": 0, "documents": 0}
+    for prof in data.get("profiles", []):
+        name = (prof.get("name") or "Me").strip()
+        u = db.query(User).filter(func.lower(User.name) == name.lower()).first()
+        if not u:
+            # Fresh install: adopt the empty default "Me" profile instead of adding a second one.
+            only = db.query(User).all()
+            if len(only) == 1 and only[0].name == "Me" and not only[0].jobs and not only[0].personas:
+                u = only[0]
+                u.name = name
+            else:
+                u = User(name=name)
+                db.add(u)
+            db.flush()
+            summary["profiles"] += 1
+        if prof.get("preferences") and not u.preferences:
+            u.preferences = prof["preferences"]
+
+        existing_p = {p.name.lower() for p in u.personas}
+        has_default = any(p.is_default for p in u.personas)
+        for p in prof.get("personas", []):
+            if p.get("name", "").lower() in existing_p:
+                continue
+            make_def = bool(p.get("is_default")) and not has_default
+            has_default = has_default or make_def
+            db.add(Persona(user_id=u.id, name=p.get("name") or "Resume", resume_text=p.get("resume_text") or "",
+                           is_default=make_def))
+            summary["resumes"] += 1
+
+        for j in prof.get("jobs", []):
+            url = normalize_url(j.get("url") or "")
+            if not (j.get("title") or "").strip():
+                continue
+            same_linkless = not url and db.query(Job).filter(
+                Job.user_id == u.id, Job.url.is_(None), Job.title == j["title"][:300],
+                Job.company == (j.get("company") or "")).first()
+            if find_dupe(db, u, url) or same_linkless:
+                summary["duplicates"] += 1
+                continue
+            job = Job(
+                user_id=u.id, url=url or None, title=j["title"][:300],
+                **{k: (j.get(k) or "") for k in ("company", "location", "salary", "employment_type", "posted_date",
+                                                  "description", "tags", "notes", "fit_json")},
+                source=j.get("source") or "import", status=_map_status(j.get("status")),
+                fit_score=j.get("fit_score"), applied_at=_parse_dt(j.get("applied_at")),
+                created_at=_parse_dt(j.get("created_at")) or now(),
+            )
+            db.add(job)
+            db.flush()
+            summary["jobs"] += 1
+            for d in j.get("documents", []):
+                db.add(Document(job_id=job.id, kind=d.get("kind") or "resume", content=d.get("content") or "",
+                                persona_name=d.get("persona_name") or "",
+                                created_at=_parse_dt(d.get("created_at")) or now()))
+                summary["documents"] += 1
+    db.commit()
+    return summary
+
+
+# ---------- frontend ----------
+
+@app.get("/sw.js", include_in_schema=False)
+def sw():
+    return FileResponse(config.STATIC_DIR / "sw.js", media_type="text/javascript",
+                        headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/manifest.webmanifest", include_in_schema=False)
+def manifest():
+    return FileResponse(config.STATIC_DIR / "manifest.webmanifest", media_type="application/manifest+json")
+
+
+app.mount("/assets", StaticFiles(directory=config.STATIC_DIR), name="assets")
+
+
+@app.get("/{path:path}", include_in_schema=False)
+def spa(path: str):
+    if path.startswith("api/"):
+        raise HTTPException(404)
+    return FileResponse(config.STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})

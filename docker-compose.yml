@@ -1,0 +1,14 @@
+services:
+  jobhacker:
+    image: ghcr.io/hacker001sg-byte/job-hacker-2:latest
+    build: .
+    container_name: jobhacker
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - jobhacker_data:/data
+
+volumes:
+  jobhacker_data:
