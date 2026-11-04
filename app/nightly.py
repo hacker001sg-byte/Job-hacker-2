@@ -1,6 +1,9 @@
-"""Overnight run: for each profile that has it turned on, make a tailored resume
-(and optionally a fit check / cover letter) for every saved job that doesn't
-have one yet. Runs inside the app on a background thread — no cron needed.
+"""Overnight run: for each profile that has it turned on, work through the jobs
+the user put on tonight's list (Job.queued) and make what the settings ask for:
+a tailored resume, a fit check, a cover letter. Nothing is made for jobs that
+aren't on the list. A job comes off the list once everything for it worked;
+anything that failed stays on for the next night.
+Runs inside the app on a background thread — no cron needed.
 
 Only one run happens at a time. A run can be stopped from Settings; it finishes
 the item it's on and then stops.
@@ -13,8 +16,6 @@ import logging
 import threading
 import time
 from zoneinfo import ZoneInfo
-
-from sqlalchemy import exists
 
 from . import ai, config
 from .db import Document, Job, NightlyRun, NightlySetting, Persona, SessionLocal, User, now
@@ -50,24 +51,22 @@ def _persona(db, user_id: int) -> Persona | None:
     return q.filter(Persona.is_default.is_(True)).first() or q.order_by(Persona.id).first()
 
 
-def _has_doc(job_id, kind):
-    return exists().where(Document.job_id == job_id, Document.kind == kind)
-
-
 def plan(db, user_id: int, s: NightlySetting) -> list[tuple[Job, str]]:
-    """The (job, task) pairs a run would do right now, newest jobs first."""
+    """The (job, task) pairs a run would do right now: only jobs on tonight's list.
+    A fit check is skipped if the job already has a score; a resume or cover
+    letter is always made, since the job was picked on purpose."""
     jobs = (db.query(Job)
-            .filter(Job.user_id == user_id, Job.status == "saved", Job.description != "")
-            .order_by(Job.created_at.desc()).all())
+            .filter(Job.user_id == user_id, Job.queued.is_(True))
+            .order_by(Job.updated_at.desc()).all())
     tasks = []
     for j in jobs:
         if not (j.description or "").strip():
             continue
         if s.do_fit and j.fit_score is None:
             tasks.append((j, "fit"))
-        if s.do_resume and not db.query(_has_doc(j.id, "resume")).scalar():
+        if s.do_resume:
             tasks.append((j, "resume"))
-        if s.do_cover and not db.query(_has_doc(j.id, "cover_letter")).scalar():
+        if s.do_cover:
             tasks.append((j, "cover_letter"))
     # cap by number of distinct jobs, not tasks
     keep, seen = [], []
@@ -83,6 +82,7 @@ def plan(db, user_id: int, s: NightlySetting) -> list[tuple[Job, str]]:
 def summary(db, user_id: int, s: NightlySetting) -> dict:
     p = plan(db, user_id, s)
     return {
+        "queued": db.query(Job).filter(Job.user_id == user_id, Job.queued.is_(True)).count(),
         "jobs": len({j.id for j, _ in p}),
         "resume": sum(t == "resume" for _, t in p),
         "fit": sum(t == "fit" for _, t in p),
@@ -130,6 +130,10 @@ def run_for_user(user_id: int, trigger: str = "schedule") -> int | None:
             tasks = plan(db, user_id, s)
             run.total = len(tasks)
             save()
+            failed_jobs: set[int] = set()
+            remaining = {}
+            for job, _ in tasks:
+                remaining[job.id] = remaining.get(job.id, 0) + 1
             for job, task in tasks:
                 if _stop.is_set():
                     save("stopped")
@@ -158,6 +162,11 @@ def run_for_user(user_id: int, trigger: str = "schedule") -> int | None:
                     run.failed += 1
                 entry["seconds"] = round(time.time() - t0)
                 entries.append(entry)
+                if not entry.get("ok"):
+                    failed_jobs.add(job.id)
+                remaining[job.id] -= 1
+                if remaining[job.id] == 0 and job.id not in failed_jobs:
+                    db.get(Job, job.id).queued = False  # all done for this job: take it off the list
                 save()
             save("done")
             return run.id

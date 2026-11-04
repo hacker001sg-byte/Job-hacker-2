@@ -84,6 +84,7 @@ class Job(Base):
     notes: Mapped[str] = mapped_column(Text, default="")
     fit_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fit_json: Mapped[str] = mapped_column(Text, default="")
+    queued: Mapped[bool] = mapped_column(Boolean, default=False)  # on the overnight list
     applied_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now, onupdate=now)
@@ -141,6 +142,7 @@ class NightlyRun(Base):
 # never alters existing ones, so add missing columns here (SQLite-safe).
 _ADDED_COLUMNS = {
     "documents": {"engine": "VARCHAR(120) DEFAULT ''", "nightly": "BOOLEAN DEFAULT 0"},
+    "jobs": {"queued": "BOOLEAN DEFAULT 0"},
 }
 
 

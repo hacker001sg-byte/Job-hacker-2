@@ -252,19 +252,35 @@ def test_nightly_settings_and_run(c, monkeypatch):
     if not c.get("/api/personas").json():
         c.post("/api/personas", json={"name": "Main", "resume_text": "My resume"})
     j = c.post("/api/jobs", json={"title": "Night job", "description": "Needs a resume", "url": "https://n.example/1"}).json()
-    pending = c.get("/api/nightly").json()["pending"]
-    assert pending["resume"] >= 1 and pending["jobs"] >= 1
+    other = c.post("/api/jobs", json={"title": "Not picked", "description": "Leave me alone"}).json()
+    bare = c.post("/api/jobs", json={"title": "No description"}).json()
+
+    # nothing is made unless it's on the list
+    assert c.get("/api/nightly").json()["pending"]["jobs"] == 0
+    r = c.post("/api/nightly/queue", json={"job_ids": [j["id"], bare["id"]], "queued": True}).json()
+    assert r["changed"] == 1 and r["pending"]["queued"] == 1 and r["pending"]["resume"] == 1
+    assert c.patch(f"/api/jobs/{bare['id']}", json={"queued": True}).status_code == 400
+    assert c.get(f"/api/jobs/{j['id']}").json()["queued"] is True
 
     run_id = nightly.run_for_user(me["id"], "manual")  # synchronous for the test
     runs = c.get("/api/nightly").json()["runs"]
-    assert runs[0]["id"] == run_id and runs[0]["status"] == "done" and runs[0]["made"] >= 2
+    assert runs[0]["id"] == run_id and runs[0]["status"] == "done" and runs[0]["made"] == 2
     full = c.get(f"/api/jobs/{j['id']}").json()
-    assert full["fit_score"] == 6
+    assert full["fit_score"] == 6 and full["queued"] is False  # done, so off the list
     doc = next(d for d in full["documents"] if d["kind"] == "resume")
     assert doc["nightly"] and doc["engine"].startswith("Local")
     assert next(x for x in c.get("/api/jobs").json() if x["id"] == j["id"])["has_resume"]
-    # a second run doesn't redo that job
+    assert c.get(f"/api/jobs/{other['id']}").json()["documents"] == []
+
+    # list is empty now, so a second run makes nothing
     nightly.run_for_user(me["id"], "manual")
-    full2 = c.get(f"/api/jobs/{j['id']}").json()
-    assert sum(d["kind"] == "resume" for d in full2["documents"]) == 1
+    assert sum(d["kind"] == "resume" for d in c.get(f"/api/jobs/{j['id']}").json()["documents"]) == 1
+
+    # a failure keeps the job on the list for next time
+    c.patch(f"/api/jobs/{other['id']}", json={"queued": True})
+    monkeypatch.setattr(ai, "_ask", lambda *a, **k: (_ for _ in ()).throw(ai.AIError("model down")))
+    nightly.run_for_user(me["id"], "manual")
+    last = c.get("/api/nightly").json()["runs"][0]
+    assert last["failed"] >= 1 and c.get(f"/api/jobs/{other['id']}").json()["queued"] is True
+    c.post("/api/nightly/queue", json={"job_ids": [other["id"]], "queued": False})
     c.patch("/api/nightly", json={"enabled": False})

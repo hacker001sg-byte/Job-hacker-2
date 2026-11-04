@@ -313,9 +313,24 @@ a.b-title:hover { color: var(--accent); }
 .engine-one { color: var(--muted); font-size: 16px; margin: 0 0 12px; }
 .fit-again { grid-column: 1 / -1; margin-top: 8px; }
 .fit-again .engine { margin: 0; }
-.job-sub .ready { display: inline-block; margin-left: 6px; font-size: 14px; font-weight: 700; color: var(--st-interviewing); background: color-mix(in srgb, var(--st-interviewing) 12%, transparent); padding: 1px 8px; border-radius: 6px; }
+.ready { display: inline-block; margin-left: 6px; font-size: 14px; font-weight: 700; color: var(--st-interviewing); background: color-mix(in srgb, var(--st-interviewing) 12%, transparent); padding: 1px 8px; border-radius: 6px; }
 
 /* ---------- overnight ---------- */
+.pick-h { margin: 18px 0 4px; }
+.pick-sum { margin: 0 0 8px; }
+.pick-tools { gap: 0 4px; margin: 0 0 6px -10px; }
+.picklist { list-style: none; margin: 0 0 12px; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-s); max-height: 52vh; overflow: auto; background: var(--bg); }
+.picklist li + li { border-top: 1px solid var(--line); }
+.picklist label { display: grid; grid-template-columns: 24px 1fr; gap: 12px; align-items: start; padding: 12px 14px; margin: 0; font-weight: 400; cursor: pointer; min-height: 56px; }
+.picklist input { width: 22px; height: 22px; margin-top: 2px; accent-color: var(--accent); }
+.picklist label:has(input:checked) { background: var(--accent-soft); }
+.pk-t { display: block; font-weight: 700; overflow-wrap: anywhere; }
+.pk-s { display: block; color: var(--muted); font-size: 15px; }
+.pk-s .ready { margin-left: 4px; }
+.queue-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0 10px; margin: 12px 0 0 -10px; }
+.queue-row .hint { margin: 0 0 0 10px; }
+.queue-row #queue[aria-pressed=true] { color: var(--st-interviewing); }
+.job-sub .tonight { display: inline-block; margin-left: 6px; font-size: 14px; font-weight: 700; color: var(--accent); background: var(--accent-soft); padding: 1px 8px; border-radius: 6px; }
 .switch { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 18px; cursor: pointer; min-height: 44px; margin: 0; }
 .switch input { width: 24px; height: 24px; accent-color: var(--accent); }
 .checks { border: 0; padding: 0; margin: 0 0 12px; display: flex; flex-wrap: wrap; gap: 6px 20px; }

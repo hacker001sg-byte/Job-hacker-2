@@ -327,7 +327,7 @@ function drawRows() {
       <span class="job-bar" style="--c:${raw(stageColor(j.status))}" title="${STAGE[j.status]?.label}"></span>
       <span>
         <span class="job-title">${j.title}</span>
-        <span class="job-sub" style="display:block">${[j.company, j.location].filter(Boolean).join(", ") || "Company not set"}${j.has_description ? "" : raw(' <span class="warn">— no description yet</span>')}${j.has_resume ? raw(' <span class="ready">Resume ready</span>') : ""}</span>
+        <span class="job-sub" style="display:block">${[j.company, j.location].filter(Boolean).join(", ") || "Company not set"}${j.has_description ? "" : raw(' <span class="warn">— no description yet</span>')}${j.has_resume ? raw(' <span class="ready">Resume ready</span>') : ""}${j.queued ? raw(' <span class="tonight">Tonight</span>') : ""}</span>
       </span>
       <span class="job-side">
         ${j.fit_score ? raw(html`<span class="fit" style="--fc:${raw(fitColor(j.fit_score))}" aria-label="Fit ${j.fit_score} out of 10">${j.fit_score}</span>`) : ""}
@@ -689,6 +689,10 @@ async function renderJob(id) {
             <button class="btn btn-primary" data-gen="resume">Tailor my resume</button>
             <button class="btn" data-gen="cover_letter">Write a cover letter</button>
           </div>
+          <div class="queue-row">
+            <button class="btn btn-ghost" id="queue" aria-pressed="${!!j.queued}" ${desc ? "" : "disabled"}>${j.queued ? "On tonight's list. Remove" : "Add to tonight's list"}</button>
+            <span class="hint">Made overnight instead, as set up in <a href="#/settings">Settings</a>.</span>
+          </div>
         </div>
         <div id="docs" style="margin-top:14px"></div>
       </section>`) : ""}
@@ -739,6 +743,19 @@ async function renderJob(id) {
     state.jobs = null;
     toast("Deleted");
     location.hash = "#/";
+  });
+
+  document.getElementById("queue")?.addEventListener("click", async (e) => {
+    const b = e.currentTarget;
+    const want = b.getAttribute("aria-pressed") !== "true";
+    try {
+      await api(`/jobs/${id}`, { method: "PATCH", json: { queued: want } });
+      j.queued = want;
+      state.jobs = null;
+      b.setAttribute("aria-pressed", want);
+      b.textContent = want ? "On tonight's list. Remove" : "Add to tonight's list";
+      toast(want ? "Added to tonight's list" : "Removed from tonight's list");
+    } catch (err) { toast(err.message, "error"); }
   });
 
   if (state.session.ai_enabled) {
@@ -929,7 +946,7 @@ async function renderSettings() {
       <div class="actions"><button class="btn btn-primary" id="save-prefs">Save</button></div>
 
       <h2>Overnight resumes</h2>
-      <p class="lead">Every night, make a tailored resume for each saved job that doesn't have one yet, so they're ready in the morning. Runs on the Mac mini, nothing to keep open.</p>
+      <p class="lead">Pick the jobs you want, and their resumes are made overnight so they're ready in the morning. Only jobs on the list are done, so nothing is spent on jobs you don't care about. Runs on the Mac mini, nothing to keep open.</p>
       <div id="nightly"><p class="hint">Loading…</p></div>
 
       <h2>Profile</h2>
@@ -1026,10 +1043,9 @@ async function drawNightly(box) {
   const st = n.settings;
   const all = engines();
   const p = n.pending;
-  const pendingText = p.jobs
-    ? [p.resume && `${p.resume} resume${p.resume === 1 ? "" : "s"}`, p.fit && `${p.fit} fit check${p.fit === 1 ? "" : "s"}`,
-       p.cover_letter && `${p.cover_letter} cover letter${p.cover_letter === 1 ? "" : "s"}`].filter(Boolean).join(", ") + ` across ${p.jobs} saved job${p.jobs === 1 ? "" : "s"}`
-    : "nothing: every saved job with a description is done";
+  if (!state.jobs) state.jobs = await api("/jobs");
+  const pickable = state.jobs.filter((j) => j.status !== "closed" && j.has_description);
+  const noDesc = state.jobs.filter((j) => j.status !== "closed" && !j.has_description).length;
   const engineOk = all[st.engine]?.available;
   const last = n.runs[0];
 
@@ -1051,12 +1067,24 @@ async function drawNightly(box) {
         <label><input type="checkbox" data-opt="do_fit" ${st.do_fit ? "checked" : ""}> Fit checks</label>
         <label><input type="checkbox" data-opt="do_cover" ${st.do_cover ? "checked" : ""}> Cover letters</label>
       </fieldset>
-      <p class="hint">Only jobs in <strong>Saved</strong> with a description are included. Jobs that already have one aren't redone.</p>
-      <p><strong>Tonight's list:</strong> ${pendingText}.</p>
+      <h3 class="pick-h">Tonight's list</h3>
+      <p class="pick-sum" id="n-sum">${raw(pendingText(p))}</p>
+      ${pickable.length ? raw(html`
+        <div class="row pick-tools">
+          <button class="btn btn-ghost" id="n-pick-new">Pick saved jobs without a resume</button>
+          <button class="btn btn-ghost" id="n-clear">Clear the list</button>
+        </div>
+        <ul class="picklist" id="n-list">
+          ${pickable.map((j) => raw(html`<li><label>
+            <input type="checkbox" data-q="${j.id}" ${j.queued ? "checked" : ""}>
+            <span><span class="pk-t">${j.title}</span><span class="pk-s">${[j.company, STAGE[j.status]?.label].filter(Boolean).join(", ")}${j.has_resume ? raw(' <span class="ready">Resume ready</span>') : ""}</span></span>
+          </label></li>`))}
+        </ul>`) : raw('<p class="hint">No jobs with a description yet. Add some first.</p>')}
+      ${noDesc ? raw(html`<p class="hint">${noDesc} job${noDesc === 1 ? " isn't" : "s aren't"} shown because ${noDesc === 1 ? "it has" : "they have"} no description yet. Fill ${noDesc === 1 ? "it" : "them"} in from the Bulk tab on Add job.</p>`) : ""}
       <div class="actions">
         ${n.running
           ? raw('<button class="btn" id="n-stop">Stop the run</button>')
-          : raw(html`<button class="btn" id="n-run" ${p.jobs ? "" : "disabled"}>Run it now</button>`)}
+          : raw(html`<button class="btn" id="n-run" ${p.jobs ? "" : "disabled"}>Run the list now</button>`)}
       </div>
     </div>
     ${last ? raw(runHtml(last, n.running)) : ""}
@@ -1070,6 +1098,20 @@ async function drawNightly(box) {
   box.querySelector("#n-time").addEventListener("change", (e) => e.target.value && save({ run_time: e.target.value }));
   box.querySelector("#n-engine").addEventListener("change", (e) => save({ engine: e.target.value }));
   box.querySelectorAll("[data-opt]").forEach((c) => c.addEventListener("change", () => save({ [c.dataset.opt]: c.checked })));
+  const queue = async (ids, queued) => {
+    try {
+      const r = await api("/nightly/queue", { json: { job_ids: ids, queued } });
+      state.jobs.forEach((j) => { if (ids.includes(j.id) && (!queued || j.has_description)) j.queued = queued; });
+      box.querySelectorAll("[data-q]").forEach((c) => { c.checked = !!state.jobs.find((j) => j.id === Number(c.dataset.q))?.queued; });
+      box.querySelector("#n-sum").innerHTML = pendingText(r.pending);
+      const run = box.querySelector("#n-run");
+      if (run) run.disabled = !r.pending.jobs;
+    } catch (e) { toast(e.message, "error"); }
+  };
+  box.querySelectorAll("[data-q]").forEach((c) => c.addEventListener("change", () => queue([Number(c.dataset.q)], c.checked)));
+  box.querySelector("#n-pick-new")?.addEventListener("click", () =>
+    queue(pickable.filter((j) => j.status === "saved" && !j.has_resume).map((j) => j.id), true));
+  box.querySelector("#n-clear")?.addEventListener("click", () => queue(pickable.map((j) => j.id), false));
   box.querySelector("#n-run")?.addEventListener("click", async () => {
     try { await api("/nightly/run", { method: "POST" }); toast("Started"); setTimeout(() => drawNightly(box), 800); }
     catch (e) { toast(e.message, "error"); }
@@ -1079,6 +1121,14 @@ async function drawNightly(box) {
     await api("/nightly/stop", { method: "POST" });
   });
   if (n.running) nightlyTimer = setTimeout(() => drawNightly(box), 5000);
+}
+
+function pendingText(p) {
+  if (!p.queued) return "Empty. Tick the jobs below, or use “Add to tonight's list” on a job.";
+  const parts = [p.resume && `${p.resume} resume${p.resume === 1 ? "" : "s"}`, p.fit && `${p.fit} fit check${p.fit === 1 ? "" : "s"}`,
+    p.cover_letter && `${p.cover_letter} cover letter${p.cover_letter === 1 ? "" : "s"}`].filter(Boolean);
+  return esc(`${p.queued} job${p.queued === 1 ? "" : "s"} picked. `) +
+    (parts.length ? `<strong>${esc(parts.join(", "))}</strong> to make.` : esc("Nothing to make: turn on resumes, fit checks or cover letters above."));
 }
 
 function runHtml(r, running, compact = false) {

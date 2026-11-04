@@ -83,6 +83,7 @@ def job_out(j: Job, full: bool = True) -> dict:
         "id": j.id, "url": j.url, "title": j.title, "company": j.company, "location": j.location,
         "salary": j.salary, "employment_type": j.employment_type, "posted_date": j.posted_date,
         "source": j.source, "status": j.status, "tags": j.tags, "fit_score": j.fit_score,
+        "queued": bool(j.queued),
         "applied_at": iso(j.applied_at), "created_at": iso(j.created_at), "updated_at": iso(j.updated_at),
         "has_description": bool(j.description and j.description.strip()),
     }
@@ -138,6 +139,12 @@ class JobPatch(BaseModel):
     status: Optional[str] = None
     tags: Optional[str] = None
     notes: Optional[str] = None
+    queued: Optional[bool] = None
+
+
+class QueueIn(BaseModel):
+    job_ids: list[int]
+    queued: bool = True
 
 
 class UrlIn(BaseModel):
@@ -483,6 +490,10 @@ def update_job(job_id: int, body: JobPatch, user: User = Depends(current_user), 
             j.applied_at = now()
     if "title" in data and not (data["title"] or "").strip():
         raise HTTPException(400, "A job needs a title.")
+    if "queued" in data:
+        if data["queued"] and not (j.description or "").strip():
+            raise HTTPException(400, "Add the job description first, so there's something to tailor to.")
+        j.queued = bool(data.pop("queued"))
     for k, v in data.items():
         setattr(j, k, v if (v is not None or k == "url") else "")
     db.commit()
@@ -555,6 +566,22 @@ def run_nightly_now(user: User = Depends(current_user), db: Session = Depends(ge
     if not nightly.start_manual(user.id):
         raise HTTPException(409, "A run is already going.")
     return {"started": True}
+
+
+@app.post("/api/nightly/queue")
+def queue_jobs(body: QueueIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Put several jobs on (or take them off) tonight's list. Jobs without a
+    description are skipped when adding."""
+    jobs = db.query(Job).filter(Job.user_id == user.id, Job.id.in_(body.job_ids)).all()
+    changed = 0
+    for j in jobs:
+        if body.queued and not (j.description or "").strip():
+            continue
+        if bool(j.queued) != body.queued:
+            j.queued = body.queued
+            changed += 1
+    db.commit()
+    return {"changed": changed, **_nightly_out(db, user)}
 
 
 @app.post("/api/nightly/stop")

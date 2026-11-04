@@ -9,7 +9,7 @@ A self-hosted job-hunt workbench. Paste a link, get the job saved, move it throu
 - **Tailored resume and cover letter** per job: copy the text, edit it, or download a Word file.
 - **Phone-first:** large type, installable to your home screen, appears in the Android share menu.
 - **Claude or your local model:** every AI action has a Claude / Local switch. Local uses Ollama on the same machine (for example `qwen3:14b`), so it costs nothing per use.
-- **Overnight resumes:** at a time you choose (01:00 by default), tailored resumes and fit checks are made for every saved job that doesn't have one, using the local model or Claude. Set it up in Settings.
+- **Overnight resumes:** pick jobs for tonight's list (in Settings, or "Add to tonight's list" on a job) and at a time you choose (01:00 by default) their resumes, fit checks or cover letters are made with the local model or Claude. Only picked jobs are done.
 - **Bulk add:** paste many links at once, fill in missing details for imported jobs, or import a CSV in the old tracker's format.
 - **Profiles** for more than one person, **backup/restore**, **CSV import**, and an **API** for n8n.
 
