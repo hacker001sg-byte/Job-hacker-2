@@ -15,6 +15,7 @@ const state = {
   jobs: null,
   filter: localGet("jh.filter") || "active",
   sort: localGet("jh.sort") || "updated",
+  dir: localGet("jh.dir") || "desc",
   q: "",
 };
 
@@ -172,10 +173,12 @@ function bindEnginePickers(root = document) {
   }));
 }
 
-function setView(markup) {
+function setView(markup, { keep = false } = {}) {
   $main.innerHTML = markup;
-  $main.firstElementChild?.classList.add("view-enter");
-  window.scrollTo(0, 0);
+  if (!keep) {
+    $main.firstElementChild?.classList.add("view-enter");
+    window.scrollTo(0, 0);
+  }
 }
 
 const icon = {
@@ -197,6 +200,7 @@ async function route() {
   if (state.session.auth_required && !state.session.logged_in) return renderLogin();
   const { parts, params } = parseHash();
   document.querySelectorAll("[data-nav]").forEach((a) => a.removeAttribute("aria-current"));
+  document.body.classList.toggle("wide", !parts.length || !["job", "add", "settings"].includes(parts[0]));
   try {
     if (parts[0] === "job" && parts[1]) return await renderJob(Number(parts[1]));
     if (parts[0] === "add") { markNav("add"); return renderAdd(params); }
@@ -244,7 +248,7 @@ function renderLogin() {
 
 // ---------- list ----------
 
-async function renderList() {
+async function renderList(keep = false) {
   if (!state.jobs) {
     setView('<p class="hint">Loading your jobs…</p>');
     state.jobs = await api("/jobs");
@@ -253,13 +257,18 @@ async function renderList() {
   const counts = Object.fromEntries(STAGES.map((s) => [s.id, 0]));
   jobs.forEach((j) => counts[j.status] = (counts[j.status] || 0) + 1);
   const active = jobs.length - counts.closed;
+  const y = scrollY;
+  const focusQ = document.activeElement?.id === "q";
 
   setView(html`
     <div>
-      <form class="quickadd" id="quickadd" autocomplete="off">
-        <input type="url" inputmode="url" name="url" placeholder="Paste a job link" aria-label="Job link" required>
-        <button class="btn btn-primary" type="submit">Add</button>
-      </form>
+      <div class="listbar">
+        <form class="quickadd" id="quickadd" autocomplete="off">
+          <input type="url" inputmode="url" name="url" placeholder="Paste a job link to add it" aria-label="Job link" required>
+          <button class="btn btn-primary btn-s" type="submit">Add</button>
+        </form>
+        ${jobs.length ? raw(html`<input type="search" id="q" class="search" placeholder="Search jobs" value="${state.q}" aria-label="Search title, company, location">`) : ""}
+      </div>
 
       ${jobs.length ? raw(html`
       <section class="flow ${state.filter !== "all" && state.filter !== "active" ? "filtered" : ""}" aria-label="Pipeline">
@@ -272,21 +281,24 @@ async function renderList() {
           <button class="stage" data-filter="all" aria-pressed="${state.filter === "all"}">All <span class="n">${jobs.length}</span></button>
         </div>
       </section>
-      <div class="searchrow">
-        <input type="search" id="q" placeholder="Search title, company, notes" value="${state.q}" aria-label="Search jobs">
-        <select id="sort" aria-label="Sort">
-          <option value="updated" ${state.sort === "updated" ? "selected" : ""}>Recent</option>
-          <option value="fit" ${state.sort === "fit" ? "selected" : ""}>Best fit</option>
-          <option value="company" ${state.sort === "company" ? "selected" : ""}>Company</option>
-        </select>
+      <div class="sheet-wrap">
+        <table class="sheet">
+          <thead><tr>
+            ${SHEET_COLS.map((c) => raw(c.sort
+              ? html`<th class="${c.cls}" aria-sort="${state.sort === c.sort ? (state.dir === "asc" ? "ascending" : "descending") : "none"}"><button data-sort="${c.sort}">${c.label}<span class="arr" aria-hidden="true">${state.sort === c.sort ? (state.dir === "asc" ? "↑" : "↓") : ""}</span></button></th>`
+              : html`<th class="${c.cls}">${c.label}</th>`))}
+          </tr></thead>
+          <tbody id="jobs"></tbody>
+        </table>
       </div>
-      <ul class="jobs" id="jobs"></ul>`) : raw(html`
+      <p class="hint sheet-count" id="sheet-count"></p>`) : raw(html`
       <div class="empty">
         <h2>Your pipeline is empty</h2>
         <p>Paste a link to a job posting above. LinkedIn, MyCareersFuture, company career pages and most job boards work. If a site won't share its details, you can paste the post's text instead.</p>
-        <p>Moving from the old tracker? Import your backup in <a href="#/settings">Settings</a>.</p>
+        <p>Have a list already? Use the <a href="#/add?mode=bulk">Bulk</a> tab to paste many links or import a CSV.</p>
       </div>`)}
-    </div>`);
+    </div>`, { keep });
+  if (keep) scrollTo(0, y);
 
   document.getElementById("quickadd").addEventListener("submit", (e) => {
     e.preventDefault();
@@ -297,15 +309,50 @@ async function renderList() {
   $main.querySelectorAll("[data-filter]").forEach((b) => b.addEventListener("click", () => {
     state.filter = b.dataset.filter;
     localSet("jh.filter", state.filter);
-    renderList();
+    renderList(true);
   }));
   const q = document.getElementById("q");
   q.addEventListener("input", () => { state.q = q.value; drawRows(); });
-  document.getElementById("sort").addEventListener("change", (e) => {
-    state.sort = e.target.value; localSet("jh.sort", state.sort); drawRows();
+  if (focusQ) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); }
+  $main.querySelectorAll("[data-sort]").forEach((b) => b.addEventListener("click", () => {
+    const k = b.dataset.sort;
+    if (state.sort === k) state.dir = state.dir === "asc" ? "desc" : "asc";
+    else { state.sort = k; state.dir = ["updated", "fit"].includes(k) ? "desc" : "asc"; }
+    localSet("jh.sort", state.sort); localSet("jh.dir", state.dir);
+    renderList(true);
+  }));
+  const tbody = document.getElementById("jobs");
+  tbody.addEventListener("click", (e) => {
+    if (e.target.closest("select, a, button")) return;
+    const tr = e.target.closest("tr[data-id]");
+    if (tr) location.hash = `#/job/${tr.dataset.id}`;
+  });
+  tbody.addEventListener("change", async (e) => {
+    const sel = e.target.closest("select[data-stage]");
+    if (!sel) return;
+    const id = Number(sel.dataset.stage);
+    const job = state.jobs.find((x) => x.id === id);
+    const before = job.status;
+    try {
+      const r = await api(`/jobs/${id}`, { method: "PATCH", json: { status: sel.value } });
+      Object.assign(job, { status: r.status, applied_at: r.applied_at, updated_at: r.updated_at });
+      toast(`${job.title}: ${STAGE[r.status].label}`);
+      renderList(true);
+    } catch (err) { sel.value = before; toast(err.message, "error"); }
   });
   drawRows();
 }
+
+const SHEET_COLS = [
+  { cls: "c-stage", label: "Stage", sort: "stage" },
+  { cls: "c-job", label: "Job", sort: "title" },
+  { cls: "c-co", label: "Company", sort: "company" },
+  { cls: "c-loc", label: "Location" },
+  { cls: "c-fit num", label: "Fit", sort: "fit" },
+  { cls: "c-res", label: "Resume" },
+  { cls: "c-upd num", label: "Updated", sort: "updated" },
+];
+const STAGE_ORDER = Object.fromEntries(STAGES.map((s, i) => [s.id, i]));
 
 function drawRows() {
   const needle = state.q.trim().toLowerCase();
@@ -315,25 +362,41 @@ function drawRows() {
     if (needle && !`${j.title} ${j.company} ${j.location} ${j.tags}`.toLowerCase().includes(needle)) return false;
     return true;
   });
-  if (state.sort === "fit") rows.sort((a, b) => (b.fit_score ?? -1) - (a.fit_score ?? -1));
-  else if (state.sort === "company") rows.sort((a, b) => (a.company || "").localeCompare(b.company || ""));
-  const ul = document.getElementById("jobs");
+  const dir = state.dir === "asc" ? 1 : -1;
+  const txt = (a, b) => (a || "").localeCompare(b || "", undefined, { sensitivity: "base" });
+  const cmp = {
+    updated: (a, b) => (a.updated_at || "").localeCompare(b.updated_at || ""),
+    fit: (a, b) => (a.fit_score ?? -1) - (b.fit_score ?? -1),
+    company: (a, b) => txt(a.company, b.company) || txt(a.title, b.title),
+    title: (a, b) => txt(a.title, b.title),
+    stage: (a, b) => STAGE_ORDER[a.status] - STAGE_ORDER[b.status] || (b.updated_at || "").localeCompare(a.updated_at || ""),
+  }[state.sort] || ((a, b) => (a.updated_at || "").localeCompare(b.updated_at || ""));
+  rows.sort((a, b) => dir * cmp(a, b));
+
+  const tbody = document.getElementById("jobs");
+  const count = document.getElementById("sheet-count");
+  count.textContent = `${rows.length} job${rows.length === 1 ? "" : "s"}${rows.length !== state.jobs.length ? ` of ${state.jobs.length}` : ""}`;
   if (!rows.length) {
-    ul.innerHTML = html`<li class="empty"><p>No jobs match. ${state.filter !== "all" ? "Try the All filter." : ""}</p></li>`;
+    tbody.innerHTML = html`<tr class="none"><td colspan="${SHEET_COLS.length}">No jobs match.${state.filter !== "all" ? " Try the All filter." : ""}</td></tr>`;
     return;
   }
-  ul.innerHTML = rows.map((j) => html`
-    <li><a class="job" href="#/job/${j.id}">
-      <span class="job-bar" style="--c:${raw(stageColor(j.status))}" title="${STAGE[j.status]?.label}"></span>
-      <span>
-        <span class="job-title">${j.title}</span>
-        <span class="job-sub" style="display:block">${[j.company, j.location].filter(Boolean).join(", ") || "Company not set"}${j.has_description ? "" : raw(' <span class="warn">— no description yet</span>')}${j.has_resume ? raw(' <span class="ready">Resume ready</span>') : ""}${j.queued ? raw(' <span class="tonight">Tonight</span>') : ""}</span>
-      </span>
-      <span class="job-side">
-        ${j.fit_score ? raw(html`<span class="fit" style="--fc:${raw(fitColor(j.fit_score))}" aria-label="Fit ${j.fit_score} out of 10">${j.fit_score}</span>`) : ""}
-        <span class="age" aria-label="Updated">${ago(j.updated_at)}</span>
-      </span>
-    </a></li>`).join("");
+  tbody.innerHTML = rows.map((j) => html`
+    <tr data-id="${j.id}" style="--c:${raw(stageColor(j.status))}">
+      <td class="c-stage"><span class="st-dot" aria-hidden="true"></span><select data-stage="${j.id}" aria-label="Stage for ${j.title}">
+        ${STAGES.map((s) => raw(html`<option value="${s.id}" ${s.id === j.status ? "selected" : ""}>${s.label}</option>`))}
+      </select></td>
+      <td class="c-job">
+        <a class="t" href="#/job/${j.id}"><span class="st-dot m" aria-hidden="true"></span><span>${j.title}</span></a>
+        <span class="sub">${[j.company, j.location].filter(Boolean).join(", ")}</span>
+        ${j.has_description ? "" : raw('<span class="flag warn">No description</span>')}
+        <span class="m-tags">${j.has_resume ? raw('<span class="flag ok">Resume</span>') : ""}${j.queued ? raw('<span class="flag night">Tonight</span>') : ""}</span>
+      </td>
+      <td class="c-co">${j.company || ""}</td>
+      <td class="c-loc">${j.location || ""}</td>
+      <td class="c-fit num">${j.fit_score ? raw(html`<span class="fitn" style="--fc:${raw(fitColor(j.fit_score))}" aria-label="Fit ${j.fit_score} out of 10">${j.fit_score}</span>`) : raw('<span class="nil">–</span>')}</td>
+      <td class="c-res">${j.has_resume ? raw('<span class="flag ok">Ready</span>') : ""}${j.queued ? raw('<span class="flag night">Tonight</span>') : ""}${!j.has_resume && !j.queued ? raw('<span class="nil">–</span>') : ""}</td>
+      <td class="c-upd num" title="${longDate(j.updated_at)}">${ago(j.updated_at)}</td>
+    </tr>`).join("");
 }
 
 // ---------- add ----------
@@ -1191,6 +1254,11 @@ function handleShareIntent() {
     else if (cand) location.hash = "#/add?mode=paste";
   }
 }
+
+// Column headers stick just under the top bar, whatever its height.
+const setBarH = () => document.documentElement.style.setProperty("--topbar-h", `${document.querySelector(".topbar").offsetHeight}px`);
+window.addEventListener("resize", setBarH);
+setBarH();
 
 window.addEventListener("hashchange", route);
 window.addEventListener("scroll", () => document.querySelector(".topbar").classList.toggle("scrolled", scrollY > 4), { passive: true });
