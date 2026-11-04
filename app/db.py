@@ -102,13 +102,64 @@ class Document(Base):
     kind: Mapped[str] = mapped_column(String(20))  # "resume" | "cover_letter"
     content: Mapped[str] = mapped_column(Text, default="")
     persona_name: Mapped[str] = mapped_column(String(120), default="")
+    engine: Mapped[str] = mapped_column(String(120), default="")  # e.g. "Local (qwen3:14b)"
+    nightly: Mapped[bool] = mapped_column(Boolean, default=False)  # made by the overnight run
     created_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
 
     job = relationship("Job", back_populates="documents")
 
 
+class NightlySetting(Base):
+    """Per-profile overnight run: make resumes / fit checks for saved jobs."""
+    __tablename__ = "nightly_settings"
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    run_time: Mapped[str] = mapped_column(String(5), default="01:00")  # HH:MM, local time
+    engine: Mapped[str] = mapped_column(String(20), default="local")
+    do_resume: Mapped[bool] = mapped_column(Boolean, default=True)
+    do_fit: Mapped[bool] = mapped_column(Boolean, default=True)
+    do_cover: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_run_date: Mapped[str] = mapped_column(String(10), default="")  # YYYY-MM-DD, avoids double runs
+
+
+class NightlyRun(Base):
+    __tablename__ = "nightly_runs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    trigger: Mapped[str] = mapped_column(String(20), default="schedule")  # schedule | manual
+    engine: Mapped[str] = mapped_column(String(120), default="")
+    status: Mapped[str] = mapped_column(String(20), default="running")  # running | done | failed | stopped
+    made: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    log: Mapped[str] = mapped_column(Text, default="[]")  # JSON list of {job_id, title, task, ok, note}
+    started_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now)
+    finished_at: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+# Columns added after the first release. create_all() makes new tables but
+# never alters existing ones, so add missing columns here (SQLite-safe).
+_ADDED_COLUMNS = {
+    "documents": {"engine": "VARCHAR(120) DEFAULT ''", "nightly": "BOOLEAN DEFAULT 0"},
+}
+
+
+def _migrate():
+    from sqlalchemy import inspect, text
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table, cols in _ADDED_COLUMNS.items():
+            if not insp.has_table(table):
+                continue
+            have = {c["name"] for c in insp.get_columns(table)}
+            for name, ddl in cols.items():
+                if name not in have:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
+
+
 def init_db():
     Base.metadata.create_all(engine)
+    _migrate()
     with SessionLocal() as s:
         if not s.query(User).first():
             s.add(User(name="Me"))

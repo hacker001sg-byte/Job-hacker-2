@@ -11,5 +11,7 @@ os.environ.update({
     "APP_PASSWORD": "secret",
     "API_TOKEN": "tok",
     "ANTHROPIC_API_KEY": "",
+    "OLLAMA_URL": "",
+    "NIGHTLY_SCHEDULER": "0",
 })
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

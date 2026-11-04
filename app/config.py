@@ -24,4 +24,17 @@ API_TOKEN = os.environ.get("API_TOKEN", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-5-5")
 
+# Local model through Ollama. host.docker.internal reaches the Mac from inside
+# the container (Colima and Docker Desktop both provide it).
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://host.docker.internal:11434")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:14b")
+OLLAMA_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "16384"))  # room for resume + job description
+OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "900"))
+DEFAULT_ENGINE = os.environ.get("DEFAULT_ENGINE", "claude")  # claude | local
+
+# Overnight runs
+TIMEZONE = os.environ.get("TZ_NAME", os.environ.get("TZ", "Asia/Singapore"))
+NIGHTLY_SCHEDULER = os.environ.get("NIGHTLY_SCHEDULER", "1") not in ("0", "false", "no")
+NIGHTLY_MAX_JOBS = int(os.environ.get("NIGHTLY_MAX_JOBS", "40"))
+
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"

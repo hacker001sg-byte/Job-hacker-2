@@ -8,6 +8,8 @@ A self-hosted job-hunt workbench. Paste a link, get the job saved, move it throu
 - **Fit check:** a 1–10 score against your resume and what you're looking for, with strengths, gaps and keywords.
 - **Tailored resume and cover letter** per job: copy the text, edit it, or download a Word file.
 - **Phone-first:** large type, installable to your home screen, appears in the Android share menu.
+- **Claude or your local model:** every AI action has a Claude / Local switch. Local uses Ollama on the same machine (for example `qwen3:14b`), so it costs nothing per use.
+- **Overnight resumes:** at a time you choose (01:00 by default), tailored resumes and fit checks are made for every saved job that doesn't have one, using the local model or Claude. Set it up in Settings.
 - **Bulk add:** paste many links at once, fill in missing details for imported jobs, or import a CSV in the old tracker's format.
 - **Profiles** for more than one person, **backup/restore**, **CSV import**, and an **API** for n8n.
 
@@ -40,6 +42,16 @@ To build locally instead of pulling the published image: `docker compose up -d -
 5. Expose it the same way as the quiz app: add a Cloudflare Tunnel public hostname pointing at `http://localhost:8080`. Keep `APP_PASSWORD` set whenever it's reachable from outside.
 
 Updating later: `podman compose pull && podman compose up -d`.
+
+## Using the local model (Ollama)
+
+The app talks to Ollama at `OLLAMA_URL` (default `http://host.docker.internal:11434`, which reaches the Mac from inside the container). Check the container can see it:
+
+```sh
+docker exec jobhacker python -c "import urllib.request;print(urllib.request.urlopen('http://host.docker.internal:11434/api/tags').read()[:200])"
+```
+
+If that prints your models, the Local option appears in the app. If not, Settings shows the reason. A 14B model on an M4 takes roughly 1–4 minutes per resume, so the overnight run is the comfortable way to use it.
 
 ## Bringing over the old tracker's data
 

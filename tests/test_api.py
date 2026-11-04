@@ -70,7 +70,7 @@ def test_api_token_and_x_user():
 
 
 def test_extract_url_failure_is_manual(c, monkeypatch):
-    def boom(url):
+    def boom(url, **kw):
         raise scrape.ScrapeError("That site blocks automatic reading.")
     monkeypatch.setattr("app.main.fetch_job", boom)
     r = c.post("/api/extract/url", json={"url": "https://blocked.example/job/9"})
@@ -78,7 +78,7 @@ def test_extract_url_failure_is_manual(c, monkeypatch):
 
 
 def test_extract_url_success(c, monkeypatch):
-    monkeypatch.setattr("app.main.fetch_job", lambda u: ({"title": "Agile Coach", "company": "Grab", "location": "",
+    monkeypatch.setattr("app.main.fetch_job", lambda u, **kw: ({"title": "Agile Coach", "company": "Grab", "location": "",
                                                           "salary": "", "employment_type": "", "posted_date": "",
                                                           "description": "x" * 300}, "structured data"))
     r = c.post("/api/extract/url", json={"url": "https://careers.grab.com/job/5?utm_source=a"}).json()
@@ -101,8 +101,8 @@ def test_ai_endpoints_report_clearly_when_off(c):
 
 def test_ai_fit_and_docs_with_stub(c, monkeypatch):
     from app import ai
-    monkeypatch.setattr(ai, "enabled", lambda: True)
-    monkeypatch.setattr(ai, "_ask", lambda system, user, max_tokens=0:
+    monkeypatch.setattr(ai, "available", lambda e: e == "claude")
+    monkeypatch.setattr(ai, "_ask", lambda system, user, max_tokens=0, **kw:
                         '{"score": 8, "verdict": "Good", "strengths": ["a"], "gaps": ["b"], "keywords": ["k"]}'
                         if "Score how well" in system else "TAILORED TEXT")
     c.post("/api/personas", json={"name": "Main", "resume_text": "My resume"})
@@ -170,7 +170,7 @@ def test_profiles(c):
 
 
 def test_bulk_from_url_and_refresh(c, monkeypatch):
-    def fake(url):
+    def fake(url, **kw):
         if "blocked" in url:
             raise scrape.ScrapeError("That site blocks automatic reading.")
         return ({"title": "Bulk Coach", "company": "OCBC", "location": "Singapore", "salary": "S$10k",
@@ -193,3 +193,78 @@ def test_bulk_from_url_and_refresh(c, monkeypatch):
     assert c.post(f"/api/jobs/{j['id']}/refresh").json()["status"] == "unchanged"
     nolink = c.post("/api/jobs", json={"title": "No link here"}).json()
     assert c.post(f"/api/jobs/{nolink['id']}/refresh").json()["status"] == "failed"
+
+
+
+def test_engine_choice_local_vs_claude(c, monkeypatch):
+    from app import ai
+    calls = []
+    monkeypatch.setattr(ai, "available", lambda e: True)
+    monkeypatch.setattr(ai, "_ask_claude", lambda s, u, m: calls.append("claude") or "CLAUDE TEXT")
+    monkeypatch.setattr(ai, "_ask_local", lambda s, u, m, j: calls.append("local") or "LOCAL TEXT")
+    j = c.post("/api/jobs", json={"title": "Engine job", "description": "Desc"}).json()
+    d1 = c.post(f"/api/jobs/{j['id']}/documents", json={"kind": "cover_letter", "engine": "local"}).json()
+    d2 = c.post(f"/api/jobs/{j['id']}/documents", json={"kind": "cover_letter", "engine": "claude"}).json()
+    assert calls == ["local", "claude"]
+    assert d1["content"] == "LOCAL TEXT" and d1["engine"].startswith("Local")
+    assert d2["engine"].startswith("Claude")
+    assert c.post(f"/api/jobs/{j['id']}/documents", json={"kind": "resume", "engine": "bogus"}).status_code == 400
+
+
+def test_engine_unavailable_is_clear(c, monkeypatch):
+    from app import ai
+    monkeypatch.setattr(ai, "available", lambda e: e == "claude")
+    monkeypatch.setattr(ai, "local_status", lambda force=False: {"ok": False, "model": "qwen3:14b", "reason": "Couldn't reach Ollama."})
+    j = c.post("/api/jobs", json={"title": "Engine job 2", "description": "Desc"}).json()
+    r = c.post(f"/api/jobs/{j['id']}/fit", json={"engine": "local"})
+    assert r.status_code == 400 and "Ollama" in r.json()["detail"]
+
+
+def test_local_strips_thinking(monkeypatch):
+    from app import ai, config
+    monkeypatch.setattr(config, "OLLAMA_URL", "http://ollama.test:11434")
+
+    class R:
+        status_code = 200
+        text = ""
+        def raise_for_status(self): pass
+        def json(self): return {"message": {"content": "<think>hmm</think>\n{\"score\": 7}"}}
+    sent = {}
+    monkeypatch.setattr(ai.httpx, "post", lambda url, json, timeout: sent.update(json) or R())
+    out = ai._ask_local("sys", "user", 100, True)
+    assert out == '{"score": 7}' and sent["format"] == "json" and sent["think"] is False
+    assert sent["options"]["num_ctx"] >= 8192
+
+
+def test_nightly_settings_and_run(c, monkeypatch):
+    from app import ai, nightly
+    from app.db import SessionLocal
+    monkeypatch.setattr(ai, "available", lambda e: True)
+    monkeypatch.setattr(ai, "_ask", lambda system, user, max_tokens=0, engine=None, json_mode=False:
+                        '{"score": 6, "verdict": "OK", "strengths": [], "gaps": [], "keywords": []}'
+                        if json_mode else "# Me\nx\n\n## Professional Experience\n### A | 2020 - 2021\n- y\n")
+    me = c.get("/api/session").json()["user"]
+    s = c.get("/api/nightly").json()
+    assert s["settings"]["enabled"] is False and s["settings"]["run_time"] == "01:00"
+    assert c.patch("/api/nightly", json={"run_time": "25:00"}).status_code == 422
+    s = c.patch("/api/nightly", json={"enabled": True, "engine": "local", "do_fit": True}).json()
+    assert s["settings"]["enabled"] and s["settings"]["engine"] == "local"
+    if not c.get("/api/personas").json():
+        c.post("/api/personas", json={"name": "Main", "resume_text": "My resume"})
+    j = c.post("/api/jobs", json={"title": "Night job", "description": "Needs a resume", "url": "https://n.example/1"}).json()
+    pending = c.get("/api/nightly").json()["pending"]
+    assert pending["resume"] >= 1 and pending["jobs"] >= 1
+
+    run_id = nightly.run_for_user(me["id"], "manual")  # synchronous for the test
+    runs = c.get("/api/nightly").json()["runs"]
+    assert runs[0]["id"] == run_id and runs[0]["status"] == "done" and runs[0]["made"] >= 2
+    full = c.get(f"/api/jobs/{j['id']}").json()
+    assert full["fit_score"] == 6
+    doc = next(d for d in full["documents"] if d["kind"] == "resume")
+    assert doc["nightly"] and doc["engine"].startswith("Local")
+    assert next(x for x in c.get("/api/jobs").json() if x["id"] == j["id"])["has_resume"]
+    # a second run doesn't redo that job
+    nightly.run_for_user(me["id"], "manual")
+    full2 = c.get(f"/api/jobs/{j['id']}").json()
+    assert sum(d["kind"] == "resume" for d in full2["documents"]) == 1
+    c.patch("/api/nightly", json={"enabled": False})

@@ -304,6 +304,31 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 a.b-title:hover { color: var(--accent); }
 .b-note { display: block; color: var(--muted); font-size: 16px; }
 
+/* ---------- engine switch ---------- */
+.engine { display: inline-flex; align-items: center; gap: 4px; padding: 4px; margin: 0 0 14px; background: var(--soft); border-radius: 999px; max-width: 100%; }
+.engine-l { color: var(--muted); font-size: 15px; font-weight: 700; padding: 0 8px 0 10px; }
+.engine button { min-height: 40px; padding: 0 14px; border: 0; border-radius: 999px; background: transparent; color: var(--muted); font: 700 16px/1 var(--font-body); cursor: pointer; white-space: nowrap; }
+.engine button[aria-checked=true] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgb(0 0 0 / .1); }
+.engine-m { font-weight: 400; font-size: 14px; color: var(--muted); }
+.engine-one { color: var(--muted); font-size: 16px; margin: 0 0 12px; }
+.fit-again { grid-column: 1 / -1; margin-top: 8px; }
+.fit-again .engine { margin: 0; }
+.job-sub .ready { display: inline-block; margin-left: 6px; font-size: 14px; font-weight: 700; color: var(--st-interviewing); background: color-mix(in srgb, var(--st-interviewing) 12%, transparent); padding: 1px 8px; border-radius: 6px; }
+
+/* ---------- overnight ---------- */
+.switch { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 18px; cursor: pointer; min-height: 44px; margin: 0; }
+.switch input { width: 24px; height: 24px; accent-color: var(--accent); }
+.checks { border: 0; padding: 0; margin: 0 0 12px; display: flex; flex-wrap: wrap; gap: 6px 20px; }
+.checks label { display: flex; align-items: center; gap: 8px; font-weight: 400; font-size: 17px; min-height: 40px; margin: 0; }
+.checks input { width: 20px; height: 20px; accent-color: var(--accent); }
+.warn-text { color: var(--st-offer); }
+input[type=time] { font-variant-numeric: tabular-nums; }
+.run { margin-top: 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); padding: 14px 16px; }
+.run.compact { margin-top: 10px; }
+.run-head { margin: 0 0 6px; }
+.runs-old { margin-top: 12px; }
+.runs-old summary { cursor: pointer; font-weight: 700; color: var(--accent); min-height: 44px; display: flex; align-items: center; }
+
 /* ---------- settings ---------- */
 .settings h2 { margin: 34px 0 6px; }
 .settings h2:first-of-type { margin-top: 10px; }

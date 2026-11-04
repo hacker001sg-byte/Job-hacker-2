@@ -283,7 +283,7 @@ def page_text(html: str) -> tuple[str, str]:
     return title, html_to_text(str(main))
 
 
-def fetch_job(url: str) -> tuple[dict, str]:
+def fetch_job(url: str, engine: str | None = None) -> tuple[dict, str]:
     """Returns (draft, method). Raises ScrapeError when nothing usable was found."""
     url = url.strip()
     if not re.match(r"^https?://", url, re.I):
@@ -313,9 +313,9 @@ def fetch_job(url: str) -> tuple[dict, str]:
         return d, "structured data"
 
     title, text = page_text(html)
-    if ai.enabled() and len(text) > 400:
+    if ai.enabled(engine) and len(text) > 400:
         try:
-            ext = ai.extract_job(text[:20000], hint_title=title)
+            ext = ai.extract_job(text[:20000], hint_title=title, engine=engine)
             if ext.get("title"):
                 merged = _draft(**{k: ext.get(k) for k in ext})
                 if d:  # keep structured fields, fill gaps from AI

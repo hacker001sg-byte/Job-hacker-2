@@ -14,13 +14,18 @@ from pydantic import BaseModel, Field
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from . import ai, auth, config
-from .db import STATUSES, Document, Job, Persona, User, get_db, init_db, now
+from . import ai, auth, config, nightly
+from .db import STATUSES, Document, Job, NightlyRun, Persona, User, get_db, init_db, now
 from .docx_export import to_docx
 from .scrape import ScrapeError, fetch_job, normalize_url
 
 app = FastAPI(title="Job Hacker", docs_url="/api/docs", openapi_url="/api/openapi.json")
 init_db()
+
+
+@app.on_event("startup")
+def _start_background():
+    nightly.start_scheduler()
 
 OPEN_PATHS = {"/api/login", "/api/session", "/api/health", "/api/logout"}
 
@@ -92,7 +97,8 @@ def job_out(j: Job, full: bool = True) -> dict:
 
 def doc_out(d: Document) -> dict:
     return {"id": d.id, "job_id": d.job_id, "kind": d.kind, "content": d.content,
-            "persona_name": d.persona_name, "created_at": iso(d.created_at)}
+            "persona_name": d.persona_name, "engine": d.engine or "", "nightly": bool(d.nightly),
+            "created_at": iso(d.created_at)}
 
 
 def persona_out(p: Persona) -> dict:
@@ -136,17 +142,33 @@ class JobPatch(BaseModel):
 
 class UrlIn(BaseModel):
     url: str
+    engine: Optional[str] = None  # claude | local | None (default)
 
 
 class TextIn(BaseModel):
     text: str
     url: Optional[str] = ""
+    engine: Optional[str] = None
 
 
 class GenIn(BaseModel):
     kind: str  # resume | cover_letter
     persona_id: Optional[int] = None
     instructions: str = ""
+    engine: Optional[str] = None
+
+
+class EngineIn(BaseModel):
+    engine: Optional[str] = None
+
+
+class NightlyIn(BaseModel):
+    enabled: Optional[bool] = None
+    run_time: Optional[str] = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    engine: Optional[str] = None
+    do_resume: Optional[bool] = None
+    do_fit: Optional[bool] = None
+    do_cover: Optional[bool] = None
 
 
 class DocPatch(BaseModel):
@@ -184,6 +206,7 @@ def session_info(request: Request, db: Session = Depends(get_db)):
     authed = auth.is_authed(request)
     out = {"auth_required": bool(config.APP_PASSWORD), "logged_in": authed, "ai_enabled": ai.enabled()}
     if authed:
+        out["engines"] = ai.engines()
         u = current_user(request, db)
         out["user"] = {"id": u.id, "name": u.name, "preferences": u.preferences}
         out["users"] = [{"id": x.id, "name": x.name} for x in db.query(User).order_by(User.id)]
@@ -324,7 +347,7 @@ def extract_url(body: UrlIn, user: User = Depends(current_user), db: Session = D
     if dupe:
         return {"existing_id": dupe.id, "title": dupe.title, "company": dupe.company}
     try:
-        draft, method = fetch_job(body.url)
+        draft, method = fetch_job(body.url, engine=_engine_or_none(body.engine))
     except ScrapeError as e:
         return JSONResponse({"needs_manual": True, "reason": str(e), "url": url}, status_code=422)
     draft["url"] = url
@@ -339,9 +362,10 @@ def extract_text(body: TextIn):
     url = normalize_url(body.url or "")
     if ai.enabled():
         try:
-            d = ai.extract_job(text[:30000])
+            eng = ai.resolve(body.engine)
+            d = ai.extract_job(text[:30000], engine=eng)
             d["url"] = url
-            return {"draft": d, "method": "AI"}
+            return {"draft": d, "method": "AI", "engine": ai.label(eng)}
         except ai.AIError as e:
             fallback_reason = str(e)
     else:
@@ -359,7 +383,9 @@ def extract_text(body: TextIn):
 @app.get("/api/jobs")
 def list_jobs(user: User = Depends(current_user), db: Session = Depends(get_db)):
     jobs = db.query(Job).filter(Job.user_id == user.id).order_by(Job.updated_at.desc()).all()
-    return [job_out(j, full=False) for j in jobs]
+    with_resume = {r[0] for r in db.query(Document.job_id).join(Job)
+                   .filter(Job.user_id == user.id, Document.kind == "resume").distinct()}
+    return [{**job_out(j, full=False), "has_resume": j.id in with_resume} for j in jobs]
 
 
 @app.post("/api/jobs")
@@ -404,7 +430,7 @@ def job_from_url(body: UrlIn, user: User = Depends(current_user), db: Session = 
     if dupe:
         return {"status": "duplicate", "url": url, "job": job_out(dupe, full=False)}
     try:
-        draft, method = fetch_job(body.url)
+        draft, method = fetch_job(body.url, engine=_engine_or_none(body.engine))
     except ScrapeError as e:
         return {"status": "failed", "reason": str(e), "url": url}
     j = Job(user_id=user.id, url=url, source="bulk", title=(draft.get("title") or "Untitled job")[:300],
@@ -416,14 +442,15 @@ def job_from_url(body: UrlIn, user: User = Depends(current_user), db: Session = 
 
 
 @app.post("/api/jobs/{job_id}/refresh")
-def refresh_job(job_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def refresh_job(job_id: int, body: Optional[EngineIn] = None, user: User = Depends(current_user),
+                db: Session = Depends(get_db)):
     """Re-read a saved job's link and fill only the fields that are empty.
     Never overwrites anything already there. Always 200: status updated | unchanged | failed."""
     j = own_job(job_id, user, db)
     if not j.url:
         return {"status": "failed", "reason": "This job has no link to read."}
     try:
-        draft, _ = fetch_job(j.url)
+        draft, _ = fetch_job(j.url, engine=_engine_or_none(body.engine if body else None))
     except ScrapeError as e:
         return {"status": "failed", "reason": str(e)}
     filled = [k for k in DETAIL_FIELDS if draft.get(k) and not (getattr(j, k) or "").strip()]
@@ -472,16 +499,82 @@ def delete_job(job_id: int, user: User = Depends(current_user), db: Session = De
 
 # ---------- AI on a job ----------
 
+def _engine_or_400(engine: str | None) -> str:
+    try:
+        return ai.resolve(engine)
+    except ai.AIError as e:
+        raise HTTPException(400, str(e))
+
+
+def _engine_or_none(engine: str | None) -> str | None:
+    """For link reading, where AI is only a fallback: use the chosen engine if
+    it's usable, otherwise quietly fall back to the default."""
+    return engine if engine and ai.available(engine) else None
+
+
+# ---------- overnight runs ----------
+
+def _nightly_out(db: Session, user: User) -> dict:
+    s = nightly.settings_for(db, user.id)
+    runs = db.query(NightlyRun).filter(NightlyRun.user_id == user.id).order_by(NightlyRun.id.desc()).limit(5).all()
+    return {
+        "settings": {k: getattr(s, k) for k in ("enabled", "run_time", "engine", "do_resume", "do_fit", "do_cover")},
+        "timezone": config.TIMEZONE,
+        "running": nightly.is_running(),
+        "pending": nightly.summary(db, user.id, s),
+        "runs": [{
+            "id": r.id, "trigger": r.trigger, "engine": r.engine, "status": r.status, "made": r.made,
+            "failed": r.failed, "total": r.total, "log": json.loads(r.log or "[]"),
+            "started_at": iso(r.started_at), "finished_at": iso(r.finished_at),
+        } for r in runs],
+    }
+
+
+@app.get("/api/nightly")
+def get_nightly(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    return _nightly_out(db, user)
+
+
+@app.patch("/api/nightly")
+def update_nightly(body: NightlyIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    s = nightly.settings_for(db, user.id)
+    data = body.model_dump(exclude_unset=True)
+    if "engine" in data and data["engine"] not in ai.ENGINES:
+        raise HTTPException(400, "engine must be claude or local")
+    for k, v in data.items():
+        if v is not None:
+            setattr(s, k, v)
+    if "run_time" in data:
+        s.last_run_date = ""  # a new time should be able to run today
+    db.commit()
+    return _nightly_out(db, user)
+
+
+@app.post("/api/nightly/run")
+def run_nightly_now(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if not nightly.start_manual(user.id):
+        raise HTTPException(409, "A run is already going.")
+    return {"started": True}
+
+
+@app.post("/api/nightly/stop")
+def stop_nightly():
+    nightly.request_stop()
+    return {"ok": True}
+
 @app.post("/api/jobs/{job_id}/fit")
-def check_fit(job_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+def check_fit(job_id: int, body: Optional[EngineIn] = None, user: User = Depends(current_user),
+              db: Session = Depends(get_db)):
     j = own_job(job_id, user, db)
     if not (j.description or "").strip():
         raise HTTPException(400, "Add the job description first, so there's something to compare against.")
     p = default_persona(db, user)
+    eng = _engine_or_400(body.engine if body else None)
     try:
-        result = ai.fit(p.resume_text if p else "", user.preferences, j)
+        result = ai.fit(p.resume_text if p else "", user.preferences, j, engine=eng)
     except ai.AIError as e:
         raise HTTPException(502, str(e))
+    result["engine"] = ai.label(eng)
     j.fit_score = result["score"]
     j.fit_json = json.dumps(result)
     db.commit()
@@ -499,12 +592,13 @@ def generate_document(job_id: int, body: GenIn, user: User = Depends(current_use
     p = default_persona(db, user, body.persona_id)
     if not p or not p.resume_text.strip():
         raise HTTPException(400, "Add your base resume in Settings first.")
+    eng = _engine_or_400(body.engine)
     try:
         fn = ai.tailor_resume if body.kind == "resume" else ai.cover_letter
-        text = fn(p.resume_text, j, body.instructions)
+        text = fn(p.resume_text, j, body.instructions, engine=eng)
     except ai.AIError as e:
         raise HTTPException(502, str(e))
-    d = Document(job_id=j.id, kind=body.kind, content=text, persona_name=p.name)
+    d = Document(job_id=j.id, kind=body.kind, content=text, persona_name=p.name, engine=ai.label(eng))
     db.add(d)
     db.commit()
     return doc_out(d)
@@ -605,6 +699,7 @@ def export_all(db: Session = Depends(get_db)):
                                                "fit_score", "fit_json")},
                 "applied_at": iso(j.applied_at), "created_at": iso(j.created_at),
                 "documents": [{"kind": d.kind, "content": d.content, "persona_name": d.persona_name,
+                               "engine": d.engine or "",
                                "created_at": iso(d.created_at)} for d in j.documents],
             } for j in u.jobs],
         })
@@ -685,7 +780,7 @@ async def import_backup(file: UploadFile = File(...), db: Session = Depends(get_
             summary["jobs"] += 1
             for d in j.get("documents", []):
                 db.add(Document(job_id=job.id, kind=d.get("kind") or "resume", content=d.get("content") or "",
-                                persona_name=d.get("persona_name") or "",
+                                persona_name=d.get("persona_name") or "", engine=d.get("engine") or "",
                                 created_at=_parse_dt(d.get("created_at")) or now()))
                 summary["documents"] += 1
     db.commit()

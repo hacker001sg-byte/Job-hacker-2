@@ -96,7 +96,7 @@ function busy(btn, label) {
 
 // Full-screen "working" card for AI calls, so a slow request never looks like a crash.
 // Shows a spinning donut, what's happening, a typical duration and a live timer.
-function aiWait(title, detail, typical) {
+function aiWait(title, detail, typical, who = "Claude", slowAfter = 90) {
   const el = document.createElement("div");
   el.className = "aiwait";
   el.setAttribute("role", "status");
@@ -110,7 +110,7 @@ function aiWait(title, detail, typical) {
       <h2>${title}</h2>
       <p class="aiwait-detail">${detail}</p>
       <p class="aiwait-time"><span id="aw-clock">0:00</span><span class="aiwait-typ">${typical ? ` · usually ${typical}` : ""}</span></p>
-      <p class="aiwait-slow" hidden>Taking longer than usual. Still waiting for Claude, so keep this open.</p>
+      <p class="aiwait-slow" hidden>Taking longer than usual. Still waiting for ${who}, so keep this open.</p>
     </div>`;
   document.body.append(el);
   document.body.classList.add("waiting");
@@ -120,7 +120,7 @@ function aiWait(title, detail, typical) {
   const timer = setInterval(() => {
     const s = Math.floor((Date.now() - t0) / 1000);
     clock.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-    if (s >= 90) slow.hidden = false;
+    if (s >= slowAfter) slow.hidden = false;
   }, 250);
   requestAnimationFrame(() => el.classList.add("show"));
   return () => {
@@ -132,9 +132,44 @@ function aiWait(title, detail, typical) {
 }
 
 // Run an AI request with the waiting card up; always takes it down again.
+// opts: { title, detail: (who) => text, typical: { claude, local }, engine }
 async function withAI(opts, fn) {
-  const stop = aiWait(opts.title, opts.detail, opts.typical);
-  try { return await fn(); } finally { stop(); }
+  const eng = opts.engine || currentEngine();
+  const who = eng === "local" ? "your local model" : "Claude";
+  const Who = who[0].toUpperCase() + who.slice(1);
+  const detail = typeof opts.detail === "function" ? opts.detail(Who, who) : opts.detail;
+  const typical = typeof opts.typical === "object" ? opts.typical[eng] : opts.typical;
+  const stop = aiWait(opts.title, detail, typical, who, eng === "local" ? 300 : 90);
+  try { return await fn(eng); } finally { stop(); }
+}
+
+// ---------- AI engine choice (Claude or the local Ollama model) ----------
+
+function engines() { return state.session?.engines || {}; }
+function engineName(e) { return e === "local" ? `Local (${engines().local?.model || "Ollama"})` : "Claude"; }
+function currentEngine() {
+  const all = engines();
+  const saved = localGet("jh.engine");
+  if (saved && all[saved]?.available) return saved;
+  return all.default || null;
+}
+function enginePicker() {
+  const all = engines();
+  const cur = currentEngine();
+  if (all.claude?.available && all.local?.available) {
+    return html`<div class="engine" role="radiogroup" aria-label="AI model">
+      <span class="engine-l">Use</span>
+      <button type="button" role="radio" data-engine="claude" aria-checked="${cur === "claude"}">Claude</button>
+      <button type="button" role="radio" data-engine="local" aria-checked="${cur === "local"}">Local <span class="engine-m">${all.local.model}</span></button>
+    </div>`;
+  }
+  return cur ? html`<p class="engine-one">Using ${engineName(cur)}</p>` : "";
+}
+function bindEnginePickers(root = document) {
+  root.querySelectorAll(".engine [data-engine]").forEach((b) => b.addEventListener("click", () => {
+    localSet("jh.engine", b.dataset.engine);
+    document.querySelectorAll(".engine [data-engine]").forEach((x) => x.setAttribute("aria-checked", x.dataset.engine === b.dataset.engine));
+  }));
 }
 
 function setView(markup) {
@@ -292,7 +327,7 @@ function drawRows() {
       <span class="job-bar" style="--c:${raw(stageColor(j.status))}" title="${STAGE[j.status]?.label}"></span>
       <span>
         <span class="job-title">${j.title}</span>
-        <span class="job-sub" style="display:block">${[j.company, j.location].filter(Boolean).join(", ") || "Company not set"}${j.has_description ? "" : raw(' <span class="warn">— no description yet</span>')}</span>
+        <span class="job-sub" style="display:block">${[j.company, j.location].filter(Boolean).join(", ") || "Company not set"}${j.has_description ? "" : raw(' <span class="warn">— no description yet</span>')}${j.has_resume ? raw(' <span class="ready">Resume ready</span>') : ""}</span>
       </span>
       <span class="job-side">
         ${j.fit_score ? raw(html`<span class="fit" style="--fc:${raw(fitColor(j.fit_score))}" aria-label="Fit ${j.fit_score} out of 10">${j.fit_score}</span>`) : ""}
@@ -360,20 +395,22 @@ function showMode(mode, { url = "", auto = false, note = "" } = {}) {
           <label for="pu">Link to the posting <span class="hint" style="display:inline">(optional)</span></label>
           <input id="pu" name="url" type="url" inputmode="url" value="${url}">
         </div>
+        ${state.session.ai_enabled ? raw(enginePicker()) : ""}
         <button class="btn btn-primary btn-wide" type="submit">${state.session.ai_enabled ? "Fill in the details" : "Continue"}</button>
         ${state.session.ai_enabled ? "" : raw('<p class="hint">AI is off, so you\'ll fill in title and company yourself on the next step.</p>')}
       </form>`;
     const form = document.getElementById("f-paste");
+    bindEnginePickers(form);
     form.text.focus();
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       const done = busy(e.submitter, "Reading the post");
       try {
         const r = state.session.ai_enabled
-          ? await withAI({ title: "Reading the job post", detail: "Claude is picking out the title, company, salary and description from your paste.", typical: "10–30 seconds" },
-              () => api("/extract/text", { json: { text: form.text.value, url: form.url.value } }))
+          ? await withAI({ title: "Reading the job post", detail: (w) => `${w} is picking out the title, company, salary and description from your paste.`, typical: { claude: "10–30 seconds", local: "30–90 seconds" } },
+              (engine) => api("/extract/text", { json: { text: form.text.value, url: form.url.value, engine } }))
           : await api("/extract/text", { json: { text: form.text.value, url: form.url.value } });
-        showReview(r.draft, r.method === "AI" ? "Filled in by AI from your paste. Check it over." : (r.note || "Fill in the title and company."));
+        showReview(r.draft, r.method === "AI" ? `Filled in by ${r.engine || "AI"} from your paste. Check it over.` : (r.note || "Fill in the title and company."));
       } catch (err) { toast(err.message, "error"); done(); }
     });
   } else if (mode === "bulk") {
@@ -438,7 +475,7 @@ async function renderBulk(body) {
     runBatch({
       items: links, out: document.getElementById("bulk-out"), btn: go, verb: "Saving",
       label: (u) => u.replace(/^https?:\/\/(www\.)?/, "").slice(0, 60),
-      call: (u) => api("/jobs/from-url", { json: { url: u } }),
+      call: (u) => api("/jobs/from-url", { json: { url: u, engine: currentEngine() } }),
       done: (failed) => {
         ta.value = failed.join("\n");
         ta.dispatchEvent(new Event("input"));
@@ -451,7 +488,7 @@ async function renderBulk(body) {
     runBatch({
       items: missing, out: document.getElementById("fill-out"), btn: e.currentTarget, verb: "Filling in",
       label: (j) => [j.title, j.company].filter(Boolean).join(", "),
-      call: (j) => api(`/jobs/${j.id}/refresh`, { method: "POST" }).then((r) => ({ ...r, job: r.job || j, url: j.url })),
+      call: (j) => api(`/jobs/${j.id}/refresh`, { method: "POST", json: { engine: currentEngine() } }).then((r) => ({ ...r, job: r.job || j, url: j.url })),
     });
   });
 
@@ -542,10 +579,10 @@ async function fetchLink(url, btn) {
   if (!url) return;
   const done = busy(btn, "Reading the page");
   try {
-    const r = await withAI({ title: "Reading the job page", detail: state.session.ai_enabled
-        ? "Opening the link and looking for the job details. If the page doesn't list them clearly, Claude reads it."
-        : "Opening the link and looking for the job details.", typical: "5–30 seconds" },
-      () => api("/extract/url", { json: { url } }));
+    const r = await withAI({ title: "Reading the job page", detail: (W, w) => state.session.ai_enabled
+        ? `Opening the link and looking for the job details. If the page doesn't list them clearly, ${w} reads it.`
+        : "Opening the link and looking for the job details.", typical: { claude: "5–30 seconds", local: "5–90 seconds" } },
+      (engine) => api("/extract/url", { json: { url, engine } }));
     if (r.existing_id) {
       document.getElementById("add-body").innerHTML = html`
         <div class="callout info"><p><strong>Already saved.</strong> ${r.title}${r.company ? ` at ${r.company}` : ""} is in your list.</p></div>
@@ -647,6 +684,7 @@ async function renderJob(id) {
             <label for="instr">Anything to emphasise? <span class="hint" style="display:inline">(optional)</span></label>
             <input id="instr" type="text" placeholder="e.g. lead with my Citibank transformation work">
           </div>
+          ${raw(enginePicker())}
           <div class="row">
             <button class="btn btn-primary" data-gen="resume">Tailor my resume</button>
             <button class="btn" data-gen="cover_letter">Write a cover letter</button>
@@ -704,17 +742,19 @@ async function renderJob(id) {
   });
 
   if (state.session.ai_enabled) {
+    bindEnginePickers($main);
     drawFit(j);
     drawDocs(j.documents);
     $main.querySelectorAll("[data-gen]").forEach((b) => b.addEventListener("click", async () => {
       const kind = b.dataset.gen;
       const done = busy(b, kind === "resume" ? "Tailoring" : "Writing");
       try {
+        const at = `${j.title}${j.company ? ` at ${j.company}` : ""}`;
         const doc = await withAI(kind === "resume"
-          ? { title: "Tailoring your resume", detail: `Claude is matching your resume to ${j.title}${j.company ? ` at ${j.company}` : ""} and rewriting the summary and bullets.`, typical: "30–90 seconds" }
-          : { title: "Writing your cover letter", detail: `Claude is writing a letter for ${j.title}${j.company ? ` at ${j.company}` : ""} from your resume.`, typical: "15–45 seconds" },
-          () => api(`/jobs/${id}/documents`, { json: {
-            kind, persona_id: Number(document.getElementById("persona")?.value) || null,
+          ? { title: "Tailoring your resume", detail: (w) => `${w} is matching your resume to ${at} and rewriting the summary and bullets.`, typical: { claude: "30–90 seconds", local: "1–4 minutes" } }
+          : { title: "Writing your cover letter", detail: (w) => `${w} is writing a letter for ${at} from your resume.`, typical: { claude: "15–45 seconds", local: "1–2 minutes" } },
+          (engine) => api(`/jobs/${id}/documents`, { json: {
+            kind, engine, persona_id: Number(document.getElementById("persona")?.value) || null,
             instructions: document.getElementById("instr").value,
           } }));
         j.documents.unshift(doc);
@@ -730,24 +770,26 @@ function drawFit(j) {
   const box = document.getElementById("fit");
   const f = j.fit;
   if (!f) {
-    box.innerHTML = html`<div class="panel"><p>Get a 1 to 10 score against your resume and what you're looking for, with strengths, gaps and keywords to use.</p><button class="btn btn-primary" id="dofit">Check my fit</button></div>`;
+    box.innerHTML = html`<div class="panel"><p>Get a 1 to 10 score against your resume and what you're looking for, with strengths, gaps and keywords to use.</p>${raw(enginePicker())}<button class="btn btn-primary" id="dofit">Check my fit</button></div>`;
   } else {
     box.innerHTML = html`
       <div class="panel fitbox">
         <span class="fit big" style="--fc:${raw(fitColor(f.score))}" aria-label="Fit ${f.score} out of 10">${f.score}</span>
-        <div><p class="verdict">${f.verdict}</p><button class="btn btn-ghost" id="dofit" style="margin-left:-10px">Check again</button></div>
+        <div><p class="verdict">${f.verdict}</p>${f.engine ? raw(html`<p class="hint" style="margin:-4px 0 6px">Checked by ${f.engine}</p>`) : ""}<button class="btn btn-ghost" id="dofit" style="margin-left:-10px">Check again</button></div>
         <div class="fitlists">
           <div><h3>Strengths</h3><ul>${(f.strengths || []).map((s) => raw(html`<li>${s}</li>`))}</ul></div>
           <div><h3>Gaps</h3><ul>${(f.gaps || []).map((s) => raw(html`<li>${s}</li>`))}</ul></div>
         </div>
         ${f.keywords?.length ? raw(html`<div class="kw" aria-label="Keywords to mirror">${f.keywords.map((k) => raw(html`<span>${k}</span>`))}</div>`) : ""}
+        <div class="fit-again">${raw(enginePicker())}</div>
       </div>`;
   }
+  bindEnginePickers(box);
   document.getElementById("dofit").addEventListener("click", async (e) => {
     const done = busy(e.currentTarget, "Checking");
     try {
-      const nj = await withAI({ title: "Checking your fit", detail: "Claude is comparing the job with your resume and what you're looking for.", typical: "10–30 seconds" },
-        () => api(`/jobs/${j.id}/fit`, { method: "POST" }));
+      const nj = await withAI({ title: "Checking your fit", detail: (w) => `${w} is comparing the job with your resume and what you're looking for.`, typical: { claude: "10–30 seconds", local: "30–90 seconds" } },
+        (engine) => api(`/jobs/${j.id}/fit`, { method: "POST", json: { engine } }));
       state.jobs = null;
       drawFit(nj);
     } catch (err) { toast(err.message, "error"); done(); }
@@ -794,7 +836,7 @@ function drawDocs(docs, openId) {
   const box = document.getElementById("docs");
   box.innerHTML = docs.map((d) => html`
     <details class="doc" data-doc="${d.id}" ${d.id === openId ? "open" : ""}>
-      <summary><span><span class="t">${d.kind === "resume" ? "Tailored resume" : "Cover letter"}</span><br><span class="m">${longDate(d.created_at)}${d.persona_name ? `, from ${d.persona_name}` : ""}</span></span>${raw(icon.down)}</summary>
+      <summary><span><span class="t">${d.kind === "resume" ? "Tailored resume" : "Cover letter"}</span><br><span class="m">${longDate(d.created_at)}${d.persona_name ? `, from ${d.persona_name}` : ""}${d.engine ? `, by ${d.engine}` : ""}${d.nightly ? ", made overnight" : ""}</span></span>${raw(icon.down)}</summary>
       <div class="doc-body">
         ${isMd(d.content) ? raw(html`<div class="doc-text resume-view">${raw(mdToHtml(d.content))}</div>`) : raw(html`<div class="doc-text">${d.content}</div>`)}
         <div class="row">
@@ -886,6 +928,10 @@ async function renderSettings() {
       <textarea id="prefs" placeholder="e.g. Senior Scrum Master or Agile Coach in Singapore. Hybrid or remote. Not NCS. Minimum S$9k a month.">${s.user.preferences || ""}</textarea>
       <div class="actions"><button class="btn btn-primary" id="save-prefs">Save</button></div>
 
+      <h2>Overnight resumes</h2>
+      <p class="lead">Every night, make a tailored resume for each saved job that doesn't have one yet, so they're ready in the morning. Runs on the Mac mini, nothing to keep open.</p>
+      <div id="nightly"><p class="hint">Loading…</p></div>
+
       <h2>Profile</h2>
       <p class="lead">Each profile has its own jobs and resumes. You're using <strong>${s.user.name}</strong>.</p>
       <div class="field"><label for="pname">Profile name</label><input id="pname" type="text" value="${s.user.name}"></div>
@@ -913,12 +959,13 @@ async function renderSettings() {
 
       <h2>Automations</h2>
       <p class="lead">n8n or other tools can add jobs by sending a POST to <code>${origin}/api/jobs</code> with the header <code>X-API-Key</code> set to your <code>API_TOKEN</code>. Send <code>title</code>, <code>url</code>, <code>company</code>, <code>description</code> and so on as JSON.</p>
-      <p class="lead">AI features are <strong>${s.ai_enabled ? "on" : "off"}</strong>.${s.ai_enabled ? "" : " Add ANTHROPIC_API_KEY to your .env to turn on paste extraction, fit checks and tailoring."}</p>
+      <p class="lead">AI models: Claude is <strong>${engines().claude?.available ? "on" : "off"}</strong>, and the local model (${engines().local?.model || "Ollama"}) is <strong>${engines().local?.available ? "on" : "off"}</strong>.${engines().local?.available || !engines().local?.reason ? "" : ` ${engines().local.reason}`}</p>
 
       ${s.auth_required ? raw('<h2>Session</h2><div class="actions"><button class="btn" id="logout">Log out</button></div>') : ""}
     </div>`);
 
   const reload = () => { state.jobs = null; state.session = null; route(); };
+  drawNightly(document.getElementById("nightly"));
 
   $main.querySelectorAll("[data-persona]").forEach((b) => b.addEventListener("click", () => editPersona(personas.find((p) => p.id === Number(b.dataset.persona)), personas)));
   document.getElementById("add-persona").addEventListener("click", () => editPersona(null, personas));
@@ -964,6 +1011,91 @@ async function renderSettings() {
   document.getElementById("logout")?.addEventListener("click", async () => {
     await api("/logout", { method: "POST" }); state.session = null; state.jobs = null; route();
   });
+}
+
+// ---------- overnight runs ----------
+
+const TASK = { resume: "Tailored resume", fit: "Fit check", cover_letter: "Cover letter" };
+let nightlyTimer;
+
+async function drawNightly(box) {
+  clearTimeout(nightlyTimer);
+  if (!box || !box.isConnected) return;
+  let n;
+  try { n = await api("/nightly"); } catch (e) { box.innerHTML = html`<p class="hint">${e.message}</p>`; return; }
+  const st = n.settings;
+  const all = engines();
+  const p = n.pending;
+  const pendingText = p.jobs
+    ? [p.resume && `${p.resume} resume${p.resume === 1 ? "" : "s"}`, p.fit && `${p.fit} fit check${p.fit === 1 ? "" : "s"}`,
+       p.cover_letter && `${p.cover_letter} cover letter${p.cover_letter === 1 ? "" : "s"}`].filter(Boolean).join(", ") + ` across ${p.jobs} saved job${p.jobs === 1 ? "" : "s"}`
+    : "nothing: every saved job with a description is done";
+  const engineOk = all[st.engine]?.available;
+  const last = n.runs[0];
+
+  box.innerHTML = html`
+    <div class="panel nightly">
+      <label class="switch"><input type="checkbox" id="n-on" ${st.enabled ? "checked" : ""}><span>Run every night</span></label>
+      <div class="grid2" style="margin-top:14px">
+        <div class="field"><label for="n-time">Time</label><input id="n-time" type="time" value="${st.run_time}" step="300"><p class="hint">${n.timezone} time</p></div>
+        <div class="field"><label for="n-engine">Model</label>
+          <select id="n-engine">
+            <option value="local" ${st.engine === "local" ? "selected" : ""}>${engineName("local")}</option>
+            <option value="claude" ${st.engine === "claude" ? "selected" : ""}>Claude</option>
+          </select>
+          ${engineOk ? "" : raw(html`<p class="hint warn-text">${all[st.engine]?.reason || "Not available right now."}</p>`)}
+        </div>
+      </div>
+      <fieldset class="checks"><legend class="label">Make</legend>
+        <label><input type="checkbox" data-opt="do_resume" ${st.do_resume ? "checked" : ""}> Tailored resumes</label>
+        <label><input type="checkbox" data-opt="do_fit" ${st.do_fit ? "checked" : ""}> Fit checks</label>
+        <label><input type="checkbox" data-opt="do_cover" ${st.do_cover ? "checked" : ""}> Cover letters</label>
+      </fieldset>
+      <p class="hint">Only jobs in <strong>Saved</strong> with a description are included. Jobs that already have one aren't redone.</p>
+      <p><strong>Tonight's list:</strong> ${pendingText}.</p>
+      <div class="actions">
+        ${n.running
+          ? raw('<button class="btn" id="n-stop">Stop the run</button>')
+          : raw(html`<button class="btn" id="n-run" ${p.jobs ? "" : "disabled"}>Run it now</button>`)}
+      </div>
+    </div>
+    ${last ? raw(runHtml(last, n.running)) : ""}
+    ${n.runs.length > 1 ? raw(html`<details class="runs-old"><summary>Earlier runs</summary>${n.runs.slice(1).map((r) => raw(runHtml(r, false, true)))}</details>`) : ""}`;
+
+  const save = async (patch) => {
+    try { await api("/nightly", { method: "PATCH", json: patch }); toast("Saved"); drawNightly(box); }
+    catch (e) { toast(e.message, "error"); }
+  };
+  box.querySelector("#n-on").addEventListener("change", (e) => save({ enabled: e.target.checked }));
+  box.querySelector("#n-time").addEventListener("change", (e) => e.target.value && save({ run_time: e.target.value }));
+  box.querySelector("#n-engine").addEventListener("change", (e) => save({ engine: e.target.value }));
+  box.querySelectorAll("[data-opt]").forEach((c) => c.addEventListener("change", () => save({ [c.dataset.opt]: c.checked })));
+  box.querySelector("#n-run")?.addEventListener("click", async () => {
+    try { await api("/nightly/run", { method: "POST" }); toast("Started"); setTimeout(() => drawNightly(box), 800); }
+    catch (e) { toast(e.message, "error"); }
+  });
+  box.querySelector("#n-stop")?.addEventListener("click", async (e) => {
+    e.target.disabled = true; e.target.textContent = "Stopping after this one…";
+    await api("/nightly/stop", { method: "POST" });
+  });
+  if (n.running) nightlyTimer = setTimeout(() => drawNightly(box), 5000);
+}
+
+function runHtml(r, running, compact = false) {
+  const when = new Date(r.started_at).toLocaleString(undefined, { weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" });
+  const head = running
+    ? `Running now: ${r.log.length} of ${r.total} done`
+    : { done: "Finished", failed: "Couldn't run", stopped: "Stopped", running: "Interrupted" }[r.status] || r.status;
+  const counts = [r.made && `${r.made} made`, r.failed && `${r.failed} failed`].filter(Boolean).join(", ");
+  return html`
+    <div class="run ${compact ? "compact" : ""}">
+      <p class="run-head"><strong>${head}</strong> <span class="hint" style="display:inline">${when}${r.trigger === "manual" ? ", started by hand" : ""}${r.engine ? `, ${r.engine}` : ""}${counts ? `. ${counts}.` : ""}</span></p>
+      ${running ? raw(html`<div class="batch-bar"><span style="width:${r.total ? (r.log.length / r.total) * 100 : 0}%"></span></div>`) : ""}
+      ${r.log.length ? raw(html`<ul class="batch-list">${r.log.slice().reverse().map((e) => raw(html`
+        <li class="${e.ok ? "ok" : "fail"}"><span class="b-dot"></span><span class="b-main">
+          ${e.job_id ? raw(html`<a class="b-title" href="#/job/${e.job_id}">${[e.title, e.company].filter(Boolean).join(", ")}</a>`) : ""}
+          <span class="b-note">${e.task ? TASK[e.task] : ""}${e.note ? `${e.task ? ": " : ""}${e.note}` : ""}${e.seconds ? ` (${e.seconds}s)` : ""}</span></span></li>`))}</ul>`) : ""}
+    </div>`;
 }
 
 function editPersona(p, personas) {
