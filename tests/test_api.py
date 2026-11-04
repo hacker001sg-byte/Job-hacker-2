@@ -94,7 +94,7 @@ def test_extract_text_without_ai(c):
 def test_ai_endpoints_report_clearly_when_off(c):
     j = c.post("/api/jobs", json={"title": "T", "description": "Some description"}).json()
     r = c.post(f"/api/jobs/{j['id']}/fit")
-    assert r.status_code == 502 and "ANTHROPIC_API_KEY" in r.json()["detail"]
+    assert r.status_code == 400 and "ANTHROPIC_API_KEY" in r.json()["detail"]
     r = c.post(f"/api/jobs/{j['id']}/documents", json={"kind": "resume"})
     assert r.status_code == 400  # no resume yet
 
