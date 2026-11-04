@@ -30,8 +30,9 @@ const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "
 function html(strings, ...vals) {
   return strings.reduce((out, s, i) => {
     let v = vals[i - 1];
-    if (v && v.__raw) v = v.__raw;
-    else if (Array.isArray(v)) v = v.map((x) => (x && x.__raw) ? x.__raw : esc(x)).join("");
+    const isRaw = (x) => x !== null && typeof x === "object" && "__raw" in x;
+    if (isRaw(v)) v = v.__raw;
+    else if (Array.isArray(v)) v = v.map((x) => isRaw(x) ? x.__raw : esc(x)).join("");
     else v = esc(v);
     return out + v + s;
   });
@@ -270,8 +271,9 @@ function renderAdd(params) {
       <h1>Add a job</h1>
       <div class="tabs" role="tablist" aria-label="How to add">
         <button role="tab" data-mode="link" aria-selected="${mode === "link"}">Link</button>
-        <button role="tab" data-mode="paste" aria-selected="${mode === "paste"}">Paste text</button>
+        <button role="tab" data-mode="paste" aria-selected="${mode === "paste"}">Paste</button>
         <button role="tab" data-mode="manual" aria-selected="${mode === "manual"}">Manual</button>
+        <button role="tab" data-mode="bulk" aria-selected="${mode === "bulk"}">Bulk</button>
       </div>
       <div id="add-body"></div>
     </div>`);
@@ -328,9 +330,166 @@ function showMode(mode, { url = "", auto = false, note = "" } = {}) {
         showReview(r.draft, r.method === "AI" ? "Filled in by AI from your paste. Check it over." : (r.note || "Fill in the title and company."));
       } catch (err) { toast(err.message, "error"); done(); }
     });
+  } else if (mode === "bulk") {
+    renderBulk(body);
   } else {
     showReview({ ...EMPTY, url }, "");
   }
+}
+
+// ---------- bulk add ----------
+
+let bulkCancel = false;
+
+function findLinks(text) {
+  const out = [];
+  for (const tok of (text || "").split(/[\s,;<>"'()]+/)) {
+    let t = tok.trim().replace(/[.)\]]+$/, "");
+    if (!t) continue;
+    if (/^www\./i.test(t) || /^[a-z0-9-]+(\.[a-z0-9-]+)+\/\S/i.test(t)) t = "https://" + t;
+    if (/^https?:\/\/[^/\s]+\.[^/\s]+/i.test(t) && !out.includes(t)) out.push(t);
+  }
+  return out;
+}
+
+async function renderBulk(body) {
+  if (!state.jobs) state.jobs = await api("/jobs");
+  const missing = state.jobs.filter((j) => j.url && !j.has_description);
+  body.innerHTML = html`
+    <section class="bulk">
+      <h2>Paste many links</h2>
+      <p class="hint">One per line, or paste any text with links in it. Each one is read and saved, and links you've already saved are skipped.</p>
+      <div class="field" style="margin-top:12px">
+        <label for="bulk-links" class="sr">Job links</label>
+        <textarea id="bulk-links" class="tall" placeholder="https://www.linkedin.com/jobs/view/…&#10;https://www.mycareersfuture.gov.sg/job/…"></textarea>
+        <p class="hint" id="bulk-count">No links yet.</p>
+      </div>
+      <div class="actions"><button class="btn btn-primary" id="bulk-go" disabled>Save all links</button></div>
+      <div id="bulk-out"></div>
+
+      <h2>Fill in missing details</h2>
+      ${missing.length
+        ? raw(html`<p class="hint">${missing.length} saved job${missing.length === 1 ? " has" : "s have"} a link but no description, usually from a CSV import. Each one is read from its link; nothing you've already filled in is changed.</p>
+          <div class="actions"><button class="btn" id="fill-go">Fill in ${missing.length} job${missing.length === 1 ? "" : "s"}</button></div>`)
+        : raw('<p class="hint">Every saved job with a link already has a description.</p>')}
+      <div id="fill-out"></div>
+
+      <h2>Import a CSV</h2>
+      <p class="hint">The same format as the old tracker: <code>Job URL</code>, <code>Job title</code>, <code>Company Name</code>, <code>Location</code>, <code>Published At</code>, <code>Status</code>. Only <code>Job title</code> is required.</p>
+      <div class="actions"><label class="btn" style="margin:0">Choose CSV file<input type="file" id="bulk-csv" accept=".csv,text/csv" hidden></label></div>
+    </section>`;
+
+  const ta = document.getElementById("bulk-links");
+  const go = document.getElementById("bulk-go");
+  const count = document.getElementById("bulk-count");
+  ta.addEventListener("input", () => {
+    const n = findLinks(ta.value).length;
+    count.textContent = n ? `${n} link${n === 1 ? "" : "s"} found.` : "No links yet.";
+    go.disabled = !n;
+  });
+  go.addEventListener("click", () => {
+    const links = findLinks(ta.value);
+    runBatch({
+      items: links, out: document.getElementById("bulk-out"), btn: go, verb: "Saving",
+      label: (u) => u.replace(/^https?:\/\/(www\.)?/, "").slice(0, 60),
+      call: (u) => api("/jobs/from-url", { json: { url: u } }),
+      done: (failed) => {
+        ta.value = failed.join("\n");
+        ta.dispatchEvent(new Event("input"));
+        if (failed.length) count.textContent = `${failed.length} link${failed.length === 1 ? "" : "s"} couldn't be read and ${failed.length === 1 ? "is" : "are"} left above.`;
+      },
+    });
+  });
+
+  document.getElementById("fill-go")?.addEventListener("click", (e) => {
+    runBatch({
+      items: missing, out: document.getElementById("fill-out"), btn: e.currentTarget, verb: "Filling in",
+      label: (j) => [j.title, j.company].filter(Boolean).join(", "),
+      call: (j) => api(`/jobs/${j.id}/refresh`, { method: "POST" }).then((r) => ({ ...r, job: r.job || j, url: j.url })),
+    });
+  });
+
+  const csv = document.getElementById("bulk-csv");
+  csv.addEventListener("change", async () => {
+    const file = csv.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const r = await api("/import/csv", { method: "POST", body: fd });
+      toast(`Imported ${r.added} job${r.added === 1 ? "" : "s"}${r.duplicates ? `, skipped ${r.duplicates} already saved` : ""}`);
+      state.jobs = null;
+      renderBulk(body);
+    } catch (err) { toast(err.message, "error"); }
+    csv.value = "";
+  });
+}
+
+const RESULT = {
+  added: { cls: "ok", text: "Saved" },
+  updated: { cls: "ok", text: "Filled in" },
+  duplicate: { cls: "skip", text: "Already saved" },
+  unchanged: { cls: "skip", text: "Nothing new found" },
+  failed: { cls: "fail", text: "Couldn't read it" },
+};
+
+async function runBatch({ items, out, btn, verb, label, call, done }) {
+  bulkCancel = false;
+  btn.disabled = true;
+  out.innerHTML = html`
+    <div class="batch">
+      <div class="batch-head"><strong id="b-status">${verb} 0 of ${items.length}</strong><button class="btn btn-ghost" id="b-stop">Stop</button></div>
+      <div class="batch-bar"><span id="b-bar"></span></div>
+      <ul class="batch-list" id="b-list"></ul>
+    </div>`;
+  const list = out.querySelector("#b-list");
+  const status = out.querySelector("#b-status");
+  const bar = out.querySelector("#b-bar");
+  out.querySelector("#b-stop").addEventListener("click", (e) => { bulkCancel = true; e.target.disabled = true; e.target.textContent = "Stopping…"; });
+  const tally = { ok: 0, skip: 0, fail: 0 };
+  const failed = [];
+  let i = 0;
+  for (const item of items) {
+    if (bulkCancel) break;
+    const li = document.createElement("li");
+    li.className = "busy";
+    li.innerHTML = html`<span class="b-dot"></span><span class="b-main"><span class="b-title">${label(item)}</span><span class="b-note">Reading…</span></span>`;
+    list.prepend(li);
+    let r;
+    try { r = await call(item); } catch (e) { r = { status: "failed", reason: e.message, url: typeof item === "string" ? item : item.url }; }
+    const res = RESULT[r.status] || RESULT.failed;
+    tally[res.cls]++;
+    if (res.cls === "fail") failed.push(typeof item === "string" ? item : item.url);
+    li.className = res.cls;
+    const j = r.job;
+    const title = j ? [j.title, j.company].filter(Boolean).join(", ") : label(item);
+    let note = res.text;
+    if (r.status === "updated") note += `: ${r.filled.map((f) => f.replace("_", " ")).join(", ")}`;
+    if (r.status === "failed") note += `. ${r.reason || ""}`;
+    const fix = r.status === "failed"
+      ? (j ? html` <a href="#/job/${j.id}">Open it</a>` : html` <a href="#/add?mode=paste&url=${encodeURIComponent(r.url || "")}">Paste text instead</a>`)
+      : "";
+    li.innerHTML = html`<span class="b-dot"></span><span class="b-main">${j ? raw(html`<a class="b-title" href="#/job/${j.id}">${title}</a>`) : raw(html`<span class="b-title">${title}</span>`)}<span class="b-note">${note}${raw(fix)}</span></span>`;
+    i++;
+    status.textContent = `${verb} ${i} of ${items.length}`;
+    bar.style.width = `${(i / items.length) * 100}%`;
+    if (i < items.length) await new Promise((res2) => setTimeout(res2, 600)); // be gentle with job sites
+  }
+  state.jobs = null;
+  const parts = [];
+  if (tally.ok) parts.push(`${tally.ok} ${verb === "Saving" ? "saved" : "filled in"}`);
+  if (tally.skip) parts.push(`${tally.skip} skipped`);
+  if (tally.fail) parts.push(`${tally.fail} couldn't be read`);
+  status.textContent = (bulkCancel ? "Stopped. " : "Done. ") + (parts.join(", ") || "Nothing to do") + ".";
+  out.querySelector("#b-stop").remove();
+  btn.disabled = false;
+  if (tally.fail) {
+    const p = document.createElement("p");
+    p.className = "hint";
+    p.textContent = "For the ones that couldn't be read, use “Paste text instead” and paste the post yourself.";
+    out.querySelector(".batch").append(p);
+  }
+  if (!bulkCancel || i) done?.(bulkCancel ? [...failed, ...items.slice(i)] : failed);
 }
 
 async function fetchLink(url, btn) {

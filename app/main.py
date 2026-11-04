@@ -390,6 +390,51 @@ def create_job(body: JobIn, user: User = Depends(current_user), db: Session = De
     return JSONResponse(job_out(j), status_code=201)
 
 
+DETAIL_FIELDS = ("company", "location", "salary", "employment_type", "posted_date", "description")
+
+
+@app.post("/api/jobs/from-url")
+def job_from_url(body: UrlIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Read a link and save it in one step (used by bulk add). Always 200 so a
+    batch can carry on: check "status" — added | duplicate | failed."""
+    url = normalize_url(body.url)
+    if not url:
+        return {"status": "failed", "reason": "That isn't a link.", "url": body.url}
+    dupe = find_dupe(db, user, url)
+    if dupe:
+        return {"status": "duplicate", "url": url, "job": job_out(dupe, full=False)}
+    try:
+        draft, method = fetch_job(body.url)
+    except ScrapeError as e:
+        return {"status": "failed", "reason": str(e), "url": url}
+    j = Job(user_id=user.id, url=url, source="bulk", title=(draft.get("title") or "Untitled job")[:300],
+            **{k: draft.get(k) or "" for k in DETAIL_FIELDS})
+    db.add(j)
+    db.commit()
+    db.refresh(j)
+    return {"status": "added", "url": url, "method": method, "job": job_out(j, full=False)}
+
+
+@app.post("/api/jobs/{job_id}/refresh")
+def refresh_job(job_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Re-read a saved job's link and fill only the fields that are empty.
+    Never overwrites anything already there. Always 200: status updated | unchanged | failed."""
+    j = own_job(job_id, user, db)
+    if not j.url:
+        return {"status": "failed", "reason": "This job has no link to read."}
+    try:
+        draft, _ = fetch_job(j.url)
+    except ScrapeError as e:
+        return {"status": "failed", "reason": str(e)}
+    filled = [k for k in DETAIL_FIELDS if draft.get(k) and not (getattr(j, k) or "").strip()]
+    for k in filled:
+        setattr(j, k, draft[k])
+    if filled:
+        db.commit()
+        db.refresh(j)
+    return {"status": "updated" if filled else "unchanged", "filled": filled, "job": job_out(j, full=False)}
+
+
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
     return job_out(own_job(job_id, user, db))

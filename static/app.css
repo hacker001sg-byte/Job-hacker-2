@@ -283,6 +283,27 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
 .sticky-actions { position: sticky; bottom: 0; padding: 12px 0 calc(12px + env(safe-area-inset-bottom)); background: linear-gradient(transparent, var(--bg) 30%); }
 
+/* ---------- bulk ---------- */
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.bulk h2 { margin: 30px 0 6px; }
+.bulk h2:first-child { margin-top: 0; }
+.batch { margin-top: 16px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-m); padding: 14px 16px; }
+.batch-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 44px; }
+.batch-bar { height: 8px; background: var(--soft); border-radius: 999px; overflow: hidden; margin: 6px 0 10px; }
+.batch-bar span { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 999px; transition: width .3s ease; }
+.batch-list { list-style: none; margin: 0; padding: 0; max-height: 50vh; overflow: auto; }
+.batch-list li { display: grid; grid-template-columns: 12px 1fr; gap: 12px; align-items: start; padding: 10px 0; border-top: 1px solid var(--line); }
+.batch-list li:first-child { border-top: 0; }
+.b-dot { width: 12px; height: 12px; border-radius: 50%; margin-top: 6px; background: var(--st-saved); }
+.batch-list .ok .b-dot { background: var(--st-interviewing); }
+.batch-list .skip .b-dot { background: var(--st-closed); }
+.batch-list .fail .b-dot { background: var(--st-offer); }
+.batch-list .busy .b-dot { background: transparent; border: 2.5px solid var(--accent); border-right-color: transparent; animation: spin .8s linear infinite; }
+.b-main { min-width: 0; }
+.b-title { display: block; font-weight: 700; overflow-wrap: anywhere; color: var(--ink); text-decoration: none; }
+a.b-title:hover { color: var(--accent); }
+.b-note { display: block; color: var(--muted); font-size: 16px; }
+
 /* ---------- settings ---------- */
 .settings h2 { margin: 34px 0 6px; }
 .settings h2:first-of-type { margin-top: 10px; }

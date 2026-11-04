@@ -167,3 +167,29 @@ def test_profiles(c):
     c.post(f"/api/users/{wife['id']}/select")
     assert len(c.get("/api/jobs").json()) == len(wife_jobs)
     assert me_jobs > 0
+
+
+def test_bulk_from_url_and_refresh(c, monkeypatch):
+    def fake(url):
+        if "blocked" in url:
+            raise scrape.ScrapeError("That site blocks automatic reading.")
+        return ({"title": "Bulk Coach", "company": "OCBC", "location": "Singapore", "salary": "S$10k",
+                 "employment_type": "", "posted_date": "", "description": "Full description"}, "structured data")
+    monkeypatch.setattr("app.main.fetch_job", fake)
+
+    r = c.post("/api/jobs/from-url", json={"url": "https://careers.ocbc.com/job/1?utm_source=x"}).json()
+    assert r["status"] == "added" and r["job"]["title"] == "Bulk Coach" and r["job"]["has_description"]
+    assert c.post("/api/jobs/from-url", json={"url": "careers.ocbc.com/job/1"}).json()["status"] == "duplicate"
+    f = c.post("/api/jobs/from-url", json={"url": "https://blocked.example/j"}).json()
+    assert f["status"] == "failed" and "blocks" in f["reason"]
+    assert c.post("/api/jobs/from-url", json={"url": ""}).json()["status"] == "failed"
+
+    # refresh fills only empty fields
+    j = c.post("/api/jobs", json={"title": "From CSV", "company": "Keep Me", "url": "https://x.example/csv/9"}).json()
+    r = c.post(f"/api/jobs/{j['id']}/refresh").json()
+    assert r["status"] == "updated" and set(r["filled"]) == {"location", "salary", "description"}
+    full = c.get(f"/api/jobs/{j['id']}").json()
+    assert full["company"] == "Keep Me" and full["description"] == "Full description"
+    assert c.post(f"/api/jobs/{j['id']}/refresh").json()["status"] == "unchanged"
+    nolink = c.post("/api/jobs", json={"title": "No link here"}).json()
+    assert c.post(f"/api/jobs/{nolink['id']}/refresh").json()["status"] == "failed"

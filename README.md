@@ -8,6 +8,7 @@ A self-hosted job-hunt workbench. Paste a link, get the job saved, move it throu
 - **Fit check:** a 1–10 score against your resume and what you're looking for, with strengths, gaps and keywords.
 - **Tailored resume and cover letter** per job: copy the text, edit it, or download a Word file.
 - **Phone-first:** large type, installable to your home screen, appears in the Android share menu.
+- **Bulk add:** paste many links at once, fill in missing details for imported jobs, or import a CSV in the old tracker's format.
 - **Profiles** for more than one person, **backup/restore**, **CSV import**, and an **API** for n8n.
 
 One container, one SQLite file. No separate database or nginx needed.
