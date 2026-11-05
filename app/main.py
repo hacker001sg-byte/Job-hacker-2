@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from . import ai, auth, config, nightly
 from .db import STATUSES, Document, Job, NightlyRun, Persona, User, get_db, init_db, now
 from .docx_export import to_docx
-from .scrape import ScrapeError, fetch_job, normalize_url
+from .scrape import ScrapeError, fetch_job, looks_like_url, normalize_url
 
 app = FastAPI(title="Job Hacker", docs_url="/api/docs", openapi_url="/api/openapi.json")
 init_db()
@@ -357,6 +357,7 @@ def extract_url(body: UrlIn, user: User = Depends(current_user), db: Session = D
         draft, method = fetch_job(body.url, engine=_engine_or_none(body.engine))
     except ScrapeError as e:
         return JSONResponse({"needs_manual": True, "reason": str(e), "url": url}, status_code=422)
+    draft = _clean_draft(draft)
     draft["url"] = url
     return {"draft": draft, "method": method}
 
@@ -399,9 +400,13 @@ def list_jobs(user: User = Depends(current_user), db: Session = Depends(get_db))
 def create_job(body: JobIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
     """Also the endpoint for n8n / Shortcuts (send X-API-Key). If a job with the
     same link exists, empty fields on it are filled in and it's returned with 200."""
+    if looks_like_url(body.title):
+        raise HTTPException(422, DEAD_LINK)
     url = normalize_url(body.url or "")
     data = body.model_dump()
     data["url"] = url or None
+    if looks_like_url(data.get("company")):
+        data["company"] = ""
     if data["status"] not in STATUSES:
         data["status"] = "saved"
     dupe = find_dupe(db, user, url)
@@ -424,6 +429,15 @@ def create_job(body: JobIn, user: User = Depends(current_user), db: Session = De
 
 
 DETAIL_FIELDS = ("company", "location", "salary", "employment_type", "posted_date", "description")
+DEAD_LINK = "The title is just a link, which usually means the job was taken down. Not saved."
+
+
+def _clean_draft(d: dict) -> dict:
+    """Drop link-shaped values a scraper or the AI picked up as title/company."""
+    for k in ("title", "company"):
+        if looks_like_url(d.get(k)):
+            d[k] = ""
+    return d
 
 
 @app.post("/api/jobs/from-url")
@@ -440,7 +454,10 @@ def job_from_url(body: UrlIn, user: User = Depends(current_user), db: Session = 
         draft, method = fetch_job(body.url, engine=_engine_or_none(body.engine))
     except ScrapeError as e:
         return {"status": "failed", "reason": str(e), "url": url}
-    j = Job(user_id=user.id, url=url, source="bulk", title=(draft.get("title") or "Untitled job")[:300],
+    draft = _clean_draft(draft)
+    if not draft.get("title"):
+        return {"status": "failed", "reason": "No job title on that page. The job has probably been taken down.", "url": url}
+    j = Job(user_id=user.id, url=url, source="bulk", title=draft["title"][:300],
             **{k: draft.get(k) or "" for k in DETAIL_FIELDS})
     db.add(j)
     db.commit()
@@ -460,6 +477,7 @@ def refresh_job(job_id: int, body: Optional[EngineIn] = None, user: User = Depen
         draft, _ = fetch_job(j.url, engine=_engine_or_none(body.engine if body else None))
     except ScrapeError as e:
         return {"status": "failed", "reason": str(e)}
+    draft = _clean_draft(draft)
     filled = [k for k in DETAIL_FIELDS if draft.get(k) and not (getattr(j, k) or "").strip()]
     for k in filled:
         setattr(j, k, draft[k])
@@ -467,6 +485,22 @@ def refresh_job(job_id: int, body: Optional[EngineIn] = None, user: User = Depen
         db.commit()
         db.refresh(j)
     return {"status": "updated" if filled else "unchanged", "filled": filled, "job": job_out(j, full=False)}
+
+
+@app.post("/api/cleanup/dead-links")
+def cleanup_dead_links(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Delete this profile's jobs whose title is just a link (taken-down postings),
+    and blank out company fields that are links."""
+    removed = fixed = 0
+    for j in db.query(Job).filter(Job.user_id == user.id).all():
+        if looks_like_url(j.title):
+            db.delete(j)
+            removed += 1
+        elif looks_like_url(j.company):
+            j.company = ""
+            fixed += 1
+    db.commit()
+    return {"removed": removed, "fixed": fixed}
 
 
 @app.get("/api/jobs/{job_id}")
@@ -490,6 +524,8 @@ def update_job(job_id: int, body: JobPatch, user: User = Depends(current_user), 
             j.applied_at = now()
     if "title" in data and not (data["title"] or "").strip():
         raise HTTPException(400, "A job needs a title.")
+    if "title" in data and looks_like_url(data["title"]):
+        raise HTTPException(422, "Give the job a real title, not a link.")
     if "queued" in data:
         if data["queued"] and not (j.description or "").strip():
             raise HTTPException(400, "Add the job description first, so there's something to tailor to.")
@@ -692,25 +728,29 @@ async def import_csv(file: UploadFile = File(...), user: User = Depends(current_
                 return low[n].strip()
         return ""
 
-    added = dupes = invalid = 0
+    added = dupes = invalid = dead = 0
     for row in rows:
         url = normalize_url(col(row, "job url", "url", "link"))
         title = col(row, "job title", "title")
         if not title:
             invalid += 1
             continue
+        if looks_like_url(title):
+            dead += 1
+            continue
         if find_dupe(db, user, url):
             dupes += 1
             continue
+        company = col(row, "company name", "company")
         db.add(Job(user_id=user.id, url=url or None, title=title,
-                   company=col(row, "company name", "company"), location=col(row, "location"),
+                   company="" if looks_like_url(company) else company, location=col(row, "location"),
                    posted_date=col(row, "published at", "posted", "date"),
                    description=col(row, "description", "job description"),
                    status=_map_status(col(row, "status")), source="csv"))
         db.flush()
         added += 1
     db.commit()
-    return {"rows": len(rows), "added": added, "duplicates": dupes, "skipped": invalid}
+    return {"rows": len(rows), "added": added, "duplicates": dupes, "skipped": invalid, "dead": dead}
 
 
 @app.get("/api/export")
@@ -786,7 +826,8 @@ async def import_backup(file: UploadFile = File(...), db: Session = Depends(get_
 
         for j in prof.get("jobs", []):
             url = normalize_url(j.get("url") or "")
-            if not (j.get("title") or "").strip():
+            if not (j.get("title") or "").strip() or looks_like_url(j.get("title")):
+                summary["dead"] = summary.get("dead", 0) + 1
                 continue
             same_linkless = not url and db.query(Job).filter(
                 Job.user_id == u.id, Job.url.is_(None), Job.title == j["title"][:300],

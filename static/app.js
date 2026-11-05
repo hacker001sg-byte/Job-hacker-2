@@ -83,6 +83,19 @@ function ago(iso) {
   if (d < 60) return `${d}d`;
   return `${Math.floor(d / 30)}mo`;
 }
+// Same rule as the server: a title that is really a link means the posting was taken down.
+const looksLikeUrl = (t) => /(^\s*(https?:\/\/|www\.)|:\/\/|[?&](trackingId|refId|eBP|currentJobId)=|^[\w.-]+\.(com|sg|net|org|io|co)\/\S*$)/i.test(t || "");
+
+async function removeDeadJobs(n) {
+  if (!confirm(`Remove ${n} job${n === 1 ? "" : "s"} whose title is just a link? These are postings that were taken down. This can't be undone.`)) return false;
+  try {
+    const r = await api("/cleanup/dead-links", { method: "POST" });
+    toast(`Removed ${r.removed} taken-down job${r.removed === 1 ? "" : "s"}`);
+    state.jobs = null;
+    return true;
+  } catch (e) { toast(e.message, "error"); return false; }
+}
+
 const isoDate = (s) => (/^\d{4}-\d{2}-\d{2}$/.test(s || "") ? s : "");
 // "27 Apr" this year, "27 Apr 2025" otherwise; text that isn't a date is shown as is.
 function fmtPosted(s, long = false) {
@@ -280,6 +293,9 @@ async function renderList(keep = false) {
         ${jobs.length ? raw(html`<input type="search" id="q" class="search" placeholder="Search jobs" value="${state.q}" aria-label="Search title, company, location">`) : ""}
       </div>
 
+      ${jobs.filter((j) => looksLikeUrl(j.title)).length ? raw(html`
+      <div class="callout dead-callout"><p><strong>${(() => { const n = jobs.filter((j) => looksLikeUrl(j.title)).length; return n === 1 ? "1 job looks taken down:" : `${n} jobs look taken down:`; })()}</strong> the title is just a link.</p>
+        <button class="btn btn-s" id="rm-dead">Remove them</button></div>`) : ""}
       ${jobs.length ? raw(html`
       <section class="flow ${state.filter !== "all" && state.filter !== "active" ? "filtered" : ""}" aria-label="Pipeline">
         <div class="flow-bar">
@@ -314,6 +330,9 @@ async function renderList(keep = false) {
     e.preventDefault();
     const url = e.target.url.value.trim();
     if (url) location.hash = "#/add?url=" + encodeURIComponent(url);
+  });
+  document.getElementById("rm-dead")?.addEventListener("click", async () => {
+    if (await removeDeadJobs(jobs.filter((j) => looksLikeUrl(j.title)).length)) renderList(true);
   });
   if (!jobs.length) return;
   $main.querySelectorAll("[data-filter]").forEach((b) => b.addEventListener("click", () => {
@@ -514,7 +533,7 @@ function findLinks(text) {
 
 async function renderBulk(body) {
   if (!state.jobs) state.jobs = await api("/jobs");
-  const missing = state.jobs.filter((j) => j.url && !j.has_description);
+  const missing = state.jobs.filter((j) => j.url && !j.has_description && !looksLikeUrl(j.title));
   body.innerHTML = html`
     <section class="bulk">
       <h2>Paste many links</h2>
@@ -533,6 +552,11 @@ async function renderBulk(body) {
           <div class="actions"><button class="btn" id="fill-go">Fill in ${missing.length} job${missing.length === 1 ? "" : "s"}</button></div>`)
         : raw('<p class="hint">Every saved job with a link already has a description.</p>')}
       <div id="fill-out"></div>
+
+      ${state.jobs.some((j) => looksLikeUrl(j.title)) ? raw(html`
+        <h2>Remove taken-down jobs</h2>
+        <p class="hint">${state.jobs.filter((j) => looksLikeUrl(j.title)).length} saved jobs have a link where the title should be. That usually means the posting was taken down, so there's nothing to apply to.</p>
+        <div class="actions"><button class="btn" id="bulk-dead">Remove them</button></div>`) : ""}
 
       <h2>Import a CSV</h2>
       <p class="hint">The same format as the old tracker: <code>Job URL</code>, <code>Job title</code>, <code>Company Name</code>, <code>Location</code>, <code>Published At</code>, <code>Status</code>. Only <code>Job title</code> is required.</p>
@@ -569,6 +593,10 @@ async function renderBulk(body) {
     });
   });
 
+  document.getElementById("bulk-dead")?.addEventListener("click", async () => {
+    if (await removeDeadJobs(state.jobs.filter((j) => looksLikeUrl(j.title)).length)) renderBulk(body);
+  });
+
   const csv = document.getElementById("bulk-csv");
   csv.addEventListener("change", async () => {
     const file = csv.files[0];
@@ -577,7 +605,7 @@ async function renderBulk(body) {
     fd.append("file", file);
     try {
       const r = await api("/import/csv", { method: "POST", body: fd });
-      toast(`Imported ${r.added} job${r.added === 1 ? "" : "s"}${r.duplicates ? `, skipped ${r.duplicates} already saved` : ""}`);
+      toast(`Imported ${r.added} job${r.added === 1 ? "" : "s"}${r.duplicates ? `, skipped ${r.duplicates} already saved` : ""}${r.dead ? `, left out ${r.dead} taken down` : ""}`);
       state.jobs = null;
       renderBulk(body);
     } catch (err) { toast(err.message, "error"); }

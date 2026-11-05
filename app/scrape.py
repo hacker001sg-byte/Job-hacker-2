@@ -36,6 +36,16 @@ class ScrapeError(Exception):
 
 # ---------- URL helpers ----------
 
+_URLISH = re.compile(r"(^\s*(https?://|www\.)|://|[?&](trackingId|refId|eBP|currentJobId)=|^[\w.-]+\.(com|sg|net|org|io|co)/\S*$)", re.I)
+
+
+def looks_like_url(text: str | None) -> bool:
+    """True when a 'title' or 'company' is really a link. Job boards (LinkedIn in
+    particular) leave the bare link behind when a posting has been taken down,
+    so a job titled like this is dead and not worth keeping."""
+    return bool(text) and bool(_URLISH.search(text.strip()))
+
+
 def linkedin_job_id(url: str) -> str | None:
     p = urlparse(url)
     if "linkedin." not in p.netloc:

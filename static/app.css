@@ -267,6 +267,10 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .nil { color: var(--line); }
 .sheet-count { margin: 8px 2px 0; font-size: 15px; }
 
+.c-job .t > span:last-child { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.dead-callout { display: flex; align-items: center; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; padding: 10px 14px; margin-bottom: 12px; }
+.dead-callout p { margin: 0; }
+
 /* phone: two-line rows, fewer columns */
 @media (max-width: 719px) {
   .sheet-wrap { border-radius: var(--radius-s); margin: 0 calc(var(--gutter) * -0.5); }

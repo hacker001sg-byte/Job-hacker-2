@@ -309,3 +309,35 @@ def test_old_posted_dates_are_fixed_on_startup():
     with db.engine.begin() as conn:
         row = conn.execute(text("SELECT posted_date, updated_at FROM jobs WHERE title = 'Legacy'")).one()
     assert row[0] == "2025-12-01" and str(row[1]).startswith("2026-01-02")
+
+
+def test_taken_down_jobs_are_rejected_and_cleaned(c):
+    dead = "https://www.linkedin.com/jobs/view/4456058972/?trackingId=wNmgq%3D%3D&refId=vpd&eBP=CwEAAAG"
+    csv_text = ("Company Name,Job URL,Job title,Location,Published At,Status\n"
+                f"{dead},{dead},{dead},Singapore,2026-08-24T00:00:00.000Z,In progress\n"
+                "Real Co,https://example.com/jobs/77,Real Scrum Master,Singapore,2026-08-24,Not started\n")
+    r = c.post("/api/import/csv", files={"file": ("d.csv", csv_text, "text/csv")}).json()
+    assert r["added"] == 1 and r["dead"] == 1
+    assert c.post("/api/jobs", json={"title": dead}).status_code == 422
+    ok = c.post("/api/jobs", json={"title": "Fine title", "company": "https://www.linkedin.com/company/x"}).json()
+    assert ok["company"] == ""
+    assert c.patch(f"/api/jobs/{ok['id']}", json={"title": "www.example.com/job/1"}).status_code == 422
+
+    # an old dead job already in the database gets removed by the cleanup
+    from sqlalchemy import text
+    from app import db
+    with db.engine.begin() as conn:
+        uid = c.get("/api/session").json()["user"]["id"]
+        conn.execute(text("INSERT INTO jobs (user_id, title, company, location, salary, employment_type, posted_date, "
+                          "description, source, status, tags, notes, fit_json, queued, created_at, updated_at) VALUES "
+                          "(:u, :t, :t, '', '', '', '', '', 'csv', 'applied', '', '', '', 0, '2026-01-01', '2026-01-01')"),
+                     {"u": uid, "t": dead + "&x=1"})
+    out = c.post("/api/cleanup/dead-links").json()
+    assert out["removed"] >= 1
+    assert not any(j["title"].startswith("https://") for j in c.get("/api/jobs").json())
+
+
+def test_looks_like_url():
+    from app.scrape import looks_like_url as L
+    assert L("https://www.linkedin.com/jobs/view/1/?trackingId=x") and L("%2Fm%3D&eBP=CwEA") and L("www.dbs.com/careers")
+    assert not L("Senior Scrum Master") and not L("Node.js Developer") and not L("ASP.NET Lead") and not L("")
