@@ -134,7 +134,7 @@ def test_csv_import(c):
                 "https://www.linkedin.com/jobs/view/2222222222,Agile Coach,Globex,Remote,2026-04-15,In progress\n"
                 ",,,,,\n")
     r = c.post("/api/import/csv", files={"file": ("jobs.csv", csv_text, "text/csv")}).json()
-    assert r == {"rows": 4, "added": 2, "duplicates": 1, "skipped": 1}
+    assert r == {"rows": 4, "added": 2, "duplicates": 1, "skipped": 1, "dead": 0}
     statuses = {j["title"]: j["status"] for j in c.get("/api/jobs").json()}
     assert statuses["Agile Coach"] == "applied" and statuses["Scrum Master"] == "saved"
 
