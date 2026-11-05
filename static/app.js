@@ -290,7 +290,7 @@ async function renderList(keep = false) {
           <input type="url" inputmode="url" name="url" placeholder="Paste a job link to add it" aria-label="Job link" required>
           <button class="btn btn-primary btn-s" type="submit">Add</button>
         </form>
-        ${jobs.length ? raw(html`<input type="search" id="q" class="search" placeholder="Search jobs" value="${state.q}" aria-label="Search title, company, location">`) : ""}
+        ${jobs.length ? raw(html`<input type="search" id="q" class="search" placeholder="Search jobs" enterkeyhint="search" autocomplete="off" value="${state.q}" aria-label="Search title, company, location">`) : ""}
       </div>
 
       ${jobs.filter((j) => looksLikeUrl(j.title)).length ? raw(html`
