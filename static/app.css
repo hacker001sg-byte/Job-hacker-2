@@ -240,9 +240,20 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .c-co { width: 15%; }
 .c-loc { width: 12%; }
 .c-fit { width: 58px; }
-.c-res { width: 136px; }
+.c-res { width: 96px; }
 .c-upd { width: 82px; }
 .c-post { width: 104px; }
+.c-tn { width: 84px; text-align: center !important; cursor: pointer; }
+.c-tn input { width: 22px; height: 22px; margin: 0; vertical-align: middle; accent-color: var(--accent); cursor: pointer; }
+.c-tn input:disabled { cursor: not-allowed; opacity: .35; }
+.sheet thead th.c-tn button { justify-content: center; }
+.stage-tn { --c: var(--accent); }
+.tonight-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 12px;
+  padding: 6px 6px 6px 14px; margin: 0 0 10px; background: var(--accent-soft); border-radius: var(--radius-m); }
+.tn-sum { margin: 0; font-size: 16px; }
+.tn-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; }
+.tn-tools .btn-ghost { padding: 0 10px; }
+#h-nightly { scroll-margin-top: calc(var(--topbar-h, 56px) + 12px); }
 .sheet td.c-post { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .sheet td.c-co, .sheet td.c-loc { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sheet td.c-upd { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -274,14 +285,14 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .dead-callout { display: flex; align-items: center; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; padding: 10px 14px; margin-bottom: 12px; }
 .dead-callout p { margin: 0; }
 
-/* tablet (iPad): the fixed-width columns would squeeze Job to zero, hiding the title link.
-   Drop the less important columns and show Resume/Tonight flags under the title instead. */
-@media (min-width: 720px) and (max-width: 1099px) {
-  .c-res, .c-upd { display: none; }
-  .c-job .m-tags { display: block; }
+/* tablet (iPad) and small laptops: the fixed-width columns would squeeze Job to zero, hiding the
+   title link. Drop Location and Updated; in portrait, company and location go under the title. */
+@media (min-width: 720px) and (max-width: 1199px) {
+  .c-loc, .c-upd { display: none; }
 }
 @media (min-width: 720px) and (max-width: 899px) {
-  .c-loc { display: none; }
+  .c-co { display: none; }
+  .c-job .sub { display: block; }
   .c-stage { width: 150px; }
 }
 
@@ -293,6 +304,8 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   .sheet thead th { font-size: 13px; }
   .c-fit { width: 46px; }
   .c-post { width: 92px; }
+  .c-tn { width: 78px; }
+  .tonight-bar { padding: 8px 10px; }
   .st-dot.m { display: inline-block; }
   .c-job .sub, .c-job .m-tags { display: block; }
   .c-job .sub { margin-left: 17px; }

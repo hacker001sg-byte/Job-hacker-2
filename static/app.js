@@ -227,7 +227,7 @@ async function route() {
   try {
     if (parts[0] === "job" && parts[1]) return await renderJob(Number(parts[1]));
     if (parts[0] === "add") { markNav("add"); return renderAdd(params); }
-    if (parts[0] === "settings") { markNav("settings"); return await renderSettings(); }
+    if (parts[0] === "settings") { markNav("settings"); return await renderSettings(params); }
     return await renderList();
   } catch (e) {
     if (e.status === 401) return;
@@ -280,6 +280,7 @@ async function renderList(keep = false) {
   const counts = Object.fromEntries(STAGES.map((s) => [s.id, 0]));
   jobs.forEach((j) => counts[j.status] = (counts[j.status] || 0) + 1);
   const active = jobs.length - counts.closed;
+  const picked = jobs.filter((j) => j.queued).length;
   const y = scrollY;
   const focusQ = document.activeElement?.id === "q";
 
@@ -303,10 +304,20 @@ async function renderList(keep = false) {
         </div>
         <div class="flow-legend" role="group" aria-label="Filter by stage">
           <button class="stage" data-filter="active" aria-pressed="${state.filter === "active"}">Active <span class="n">${active}</span></button>
+          <button class="stage stage-tn" data-filter="tonight" aria-pressed="${state.filter === "tonight"}"><span class="dot"></span>Tonight <span class="n">${picked}</span></button>
           ${STAGES.map((s) => raw(html`<button class="stage" data-filter="${s.id}" aria-pressed="${state.filter === s.id}" style="--c:${raw(stageColor(s.id))}"><span class="dot"></span>${s.label} <span class="n">${counts[s.id]}</span></button>`))}
           <button class="stage" data-filter="all" aria-pressed="${state.filter === "all"}">All <span class="n">${jobs.length}</span></button>
         </div>
       </section>
+      <div class="tonight-bar" id="tonight-bar">
+        <p class="tn-sum"><strong>Tonight's list:</strong> <span id="tn-sum">${picked ? `${picked} job${picked === 1 ? "" : "s"} picked.` : "empty. Tick jobs in the Tonight column."}</span></p>
+        <div class="tn-tools">
+          <button class="btn btn-ghost btn-s" id="tn-pick">Pick saved jobs without a resume</button>
+          ${picked ? raw('<button class="btn btn-ghost btn-s" id="tn-clear">Clear</button>') : ""}
+          <button class="btn btn-s" id="tn-run" ${picked ? "" : "disabled"}>Run now</button>
+          <a class="btn btn-ghost btn-s" href="#/settings?at=nightly">Schedule</a>
+        </div>
+      </div>
       <div class="sheet-wrap">
         <table class="sheet">
           <thead><tr>
@@ -346,16 +357,35 @@ async function renderList(keep = false) {
   $main.querySelectorAll("[data-sort]").forEach((b) => b.addEventListener("click", () => {
     const k = b.dataset.sort;
     if (state.sort === k) state.dir = state.dir === "asc" ? "desc" : "asc";
-    else { state.sort = k; state.dir = ["updated", "fit", "posted"].includes(k) ? "desc" : "asc"; }
+    else { state.sort = k; state.dir = ["updated", "fit", "posted", "tonight"].includes(k) ? "desc" : "asc"; }
     localSet("jh.sort", state.sort); localSet("jh.dir", state.dir);
     renderList(true);
   }));
   const tbody = document.getElementById("jobs");
   tbody.addEventListener("click", (e) => {
-    if (e.target.closest("select, a, button")) return;
+    const tn = e.target.closest("td.c-tn");
+    if (tn) { if (e.target.tagName !== "INPUT") tn.querySelector("input:not(:disabled)")?.click(); return; }
+    if (e.target.closest("select, a, button, input")) return;
     const tr = e.target.closest("tr[data-id]");
     if (tr) location.hash = `#/job/${tr.dataset.id}`;
   });
+  tbody.addEventListener("change", (e) => {
+    const box = e.target.closest("input[data-q]");
+    if (box) queueJobs([Number(box.dataset.q)], box.checked);
+  });
+  document.getElementById("tn-pick").addEventListener("click", () => {
+    const ids = jobs.filter((j) => j.status === "saved" && !j.has_resume && j.has_description && !j.queued).map((j) => j.id);
+    if (!ids.length) return toast("No saved jobs without a resume (that have a description) to add.");
+    queueJobs(ids, true);
+  });
+  document.getElementById("tn-clear")?.addEventListener("click", () => queueJobs(jobs.filter((j) => j.queued).map((j) => j.id), false));
+  document.getElementById("tn-run").addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try { await api("/nightly/run", { method: "POST" }); toast("Started. Resumes appear on each job as they're made."); }
+    catch (err) { toast(err.message, "error"); }
+    drawTonightBar();
+  });
+  drawTonightBar();
   tbody.addEventListener("change", async (e) => {
     const sel = e.target.closest("select[data-stage]");
     if (!sel) return;
@@ -372,13 +402,46 @@ async function renderList(keep = false) {
   drawRows();
 }
 
+// Put jobs on / take them off tonight's list from the job table, then redraw it.
+async function queueJobs(ids, queued) {
+  try {
+    const r = await api("/nightly/queue", { json: { job_ids: ids, queued } });
+    state.jobs.forEach((j) => { if (ids.includes(j.id) && (!queued || j.has_description)) j.queued = queued; });
+    if (ids.length > 1) toast(queued ? `Added ${r.changed} to tonight's list` : "Tonight's list cleared");
+  } catch (err) { toast(err.message, "error"); }
+  renderList(true);
+}
+
+// Fill in what tonight's run will make, when it runs, and whether one is going now.
+async function drawTonightBar() {
+  const bar = document.getElementById("tonight-bar");
+  if (!bar) return;
+  let n;
+  try { n = await api("/nightly"); } catch { return; }
+  if (!bar.isConnected) return;
+  const st = n.settings;
+  const sum = bar.querySelector("#tn-sum");
+  const run = bar.querySelector("#tn-run");
+  if (n.running) {
+    sum.textContent = "a run is going now.";
+    run.disabled = true;
+    clearTimeout(nightlyTimer);
+    nightlyTimer = setTimeout(drawTonightBar, 5000);
+    return;
+  }
+  const when = st.enabled ? ` Runs at ${st.run_time} with ${st.engine === "local" ? engineName("local") : "Claude"}.` : " Nightly runs are off (Schedule).";
+  if (n.pending.queued) sum.innerHTML = pendingText(n.pending) + esc(when);
+  run.disabled = !n.pending.jobs;
+}
+
 const SHEET_COLS = [
   { cls: "c-stage", label: "Stage", sort: "stage" },
   { cls: "c-job", label: "Job", sort: "title" },
   { cls: "c-co", label: "Company", sort: "company" },
   { cls: "c-loc", label: "Location" },
   { cls: "c-fit num", label: "Fit", sort: "fit" },
-  { cls: "c-res", label: "Resume" },
+  { cls: "c-res", label: "Resume", sort: "resume" },
+  { cls: "c-tn", label: "Tonight", sort: "tonight" },
   { cls: "c-post num", label: "Posted", sort: "posted" },
   { cls: "c-upd num", label: "Updated", sort: "updated" },
 ];
@@ -387,8 +450,9 @@ const STAGE_ORDER = Object.fromEntries(STAGES.map((s, i) => [s.id, i]));
 function drawRows() {
   const needle = state.q.trim().toLowerCase();
   let rows = state.jobs.filter((j) => {
-    if (state.filter === "active" && j.status === "closed") return false;
-    if (!["all", "active"].includes(state.filter) && j.status !== state.filter) return false;
+    if (state.filter === "tonight") { if (!j.queued) return false; }
+    else if (state.filter === "active" && j.status === "closed") return false;
+    else if (!["all", "active"].includes(state.filter) && j.status !== state.filter) return false;
     if (needle && !`${j.title} ${j.company} ${j.location} ${j.tags}`.toLowerCase().includes(needle)) return false;
     return true;
   });
@@ -401,6 +465,8 @@ function drawRows() {
     posted: (a, b) => (isoDate(a.posted_date) || "0").localeCompare(isoDate(b.posted_date) || "0"),
     company: (a, b) => txt(a.company, b.company) || txt(a.title, b.title),
     title: (a, b) => txt(a.title, b.title),
+    resume: (a, b) => (a.has_resume - b.has_resume) || (b.updated_at || "").localeCompare(a.updated_at || ""),
+    tonight: (a, b) => (a.queued - b.queued) || (a.has_description - b.has_description) || (b.updated_at || "").localeCompare(a.updated_at || ""),
     stage: (a, b) => STAGE_ORDER[a.status] - STAGE_ORDER[b.status] || (b.updated_at || "").localeCompare(a.updated_at || ""),
   }[state.sort] || ((a, b) => (a.updated_at || "").localeCompare(b.updated_at || ""));
   rows.sort((a, b) => dir * cmp(a, b));
@@ -409,7 +475,7 @@ function drawRows() {
   const count = document.getElementById("sheet-count");
   count.textContent = `${rows.length} job${rows.length === 1 ? "" : "s"}${rows.length !== state.jobs.length ? ` of ${state.jobs.length}` : ""}`;
   if (!rows.length) {
-    tbody.innerHTML = html`<tr class="none"><td colspan="${SHEET_COLS.length}">No jobs match.${state.filter !== "all" ? " Try the All filter." : ""}</td></tr>`;
+    tbody.innerHTML = html`<tr class="none"><td colspan="${SHEET_COLS.length}">${state.filter === "tonight" && !state.q ? "Nothing on tonight's list. Tick jobs in the Tonight column, or use Pick saved jobs without a resume." : `No jobs match.${state.filter !== "all" ? " Try the All filter." : ""}`}</td></tr>`;
     return;
   }
   tbody.innerHTML = rows.map((j) => html`
@@ -421,12 +487,13 @@ function drawRows() {
         <a class="t" href="#/job/${j.id}"><span class="st-dot m" aria-hidden="true"></span><span>${j.title}</span></a>
         <span class="sub">${[j.company, j.location].filter(Boolean).join(", ")}</span>
         ${j.has_description ? "" : raw('<span class="flag warn">No description</span>')}
-        <span class="m-tags">${j.has_resume ? raw('<span class="flag ok">Resume</span>') : ""}${j.queued ? raw('<span class="flag night">Tonight</span>') : ""}</span>
+        <span class="m-tags">${j.has_resume ? raw('<span class="flag ok">Resume</span>') : ""}</span>
       </td>
       <td class="c-co">${j.company || ""}</td>
       <td class="c-loc">${j.location || ""}</td>
       <td class="c-fit num">${j.fit_score ? raw(html`<span class="fitn" style="--fc:${raw(fitColor(j.fit_score))}" aria-label="Fit ${j.fit_score} out of 10">${j.fit_score}</span>`) : raw('<span class="nil">–</span>')}</td>
-      <td class="c-res">${j.has_resume ? raw('<span class="flag ok">Ready</span>') : ""}${j.queued ? raw('<span class="flag night">Tonight</span>') : ""}${!j.has_resume && !j.queued ? raw('<span class="nil">–</span>') : ""}</td>
+      <td class="c-res">${j.has_resume ? raw('<span class="flag ok">Ready</span>') : raw('<span class="nil">–</span>')}</td>
+      <td class="c-tn"><input type="checkbox" data-q="${j.id}" ${j.queued ? "checked" : ""} ${j.has_description ? "" : "disabled"} aria-label="Tonight's list: ${j.title}" title="${j.has_description ? "Make overnight" : "Needs a description first"}"></td>
       <td class="c-post num" title="${j.posted_date ? `Posted ${fmtPosted(j.posted_date, true)}` : "Posting date unknown"}">${j.posted_date ? fmtPosted(j.posted_date) : raw('<span class="nil">–</span>')}</td>
       <td class="c-upd num" title="Changed in the app ${longDate(j.updated_at)}">${ago(j.updated_at)}</td>
     </tr>`).join("");
@@ -1022,7 +1089,7 @@ function renderEdit(j) {
 
 // ---------- settings ----------
 
-async function renderSettings() {
+async function renderSettings(params) {
   await loadSession();
   const s = state.session;
   const personas = await api("/personas");
@@ -1050,8 +1117,8 @@ async function renderSettings() {
       <textarea id="prefs" placeholder="e.g. Senior Scrum Master or Agile Coach in Singapore. Hybrid or remote. Not NCS. Minimum S$9k a month.">${s.user.preferences || ""}</textarea>
       <div class="actions"><button class="btn btn-primary" id="save-prefs">Save</button></div>
 
-      <h2>Overnight resumes</h2>
-      <p class="lead">Pick the jobs you want, and their resumes are made overnight so they're ready in the morning. Only jobs on the list are done, so nothing is spent on jobs you don't care about. Runs on the Mac mini, nothing to keep open.</p>
+      <h2 id="h-nightly">Overnight resumes</h2>
+      <p class="lead">Pick the jobs you want on the job list, and their resumes are made overnight so they're ready in the morning. Only jobs on the list are done, so nothing is spent on jobs you don't care about. Runs on the Mac mini, nothing to keep open.</p>
       <div id="nightly"><p class="hint">Loading…</p></div>
 
       <h2>Profile</h2>
@@ -1088,6 +1155,7 @@ async function renderSettings() {
 
   const reload = () => { state.jobs = null; state.session = null; route(); };
   drawNightly(document.getElementById("nightly"));
+  if (params?.get("at") === "nightly") document.getElementById("h-nightly")?.scrollIntoView({ block: "start" });
 
   $main.querySelectorAll("[data-persona]").forEach((b) => b.addEventListener("click", () => editPersona(personas.find((p) => p.id === Number(b.dataset.persona)), personas)));
   document.getElementById("add-persona").addEventListener("click", () => editPersona(null, personas));
@@ -1149,7 +1217,6 @@ async function drawNightly(box) {
   const all = engines();
   const p = n.pending;
   if (!state.jobs) state.jobs = await api("/jobs");
-  const pickable = state.jobs.filter((j) => j.status !== "closed" && j.has_description);
   const noDesc = state.jobs.filter((j) => j.status !== "closed" && !j.has_description).length;
   const engineOk = all[st.engine]?.available;
   const last = n.runs[0];
@@ -1174,18 +1241,8 @@ async function drawNightly(box) {
       </fieldset>
       <h3 class="pick-h">Tonight's list</h3>
       <p class="pick-sum" id="n-sum">${raw(pendingText(p))}</p>
-      ${pickable.length ? raw(html`
-        <div class="row pick-tools">
-          <button class="btn btn-ghost" id="n-pick-new">Pick saved jobs without a resume</button>
-          <button class="btn btn-ghost" id="n-clear">Clear the list</button>
-        </div>
-        <ul class="picklist" id="n-list">
-          ${pickable.map((j) => raw(html`<li><label>
-            <input type="checkbox" data-q="${j.id}" ${j.queued ? "checked" : ""}>
-            <span><span class="pk-t">${j.title}</span><span class="pk-s">${[j.company, STAGE[j.status]?.label].filter(Boolean).join(", ")}${j.has_resume ? raw(' <span class="ready">Resume ready</span>') : ""}</span></span>
-          </label></li>`))}
-        </ul>`) : raw('<p class="hint">No jobs with a description yet. Add some first.</p>')}
-      ${noDesc ? raw(html`<p class="hint">${noDesc} job${noDesc === 1 ? " isn't" : "s aren't"} shown because ${noDesc === 1 ? "it has" : "they have"} no description yet. Fill ${noDesc === 1 ? "it" : "them"} in from the Bulk tab on Add job.</p>`) : ""}
+      <p><a href="#/" id="n-pick">Pick jobs on the job list</a>: tick the Tonight column, and sort or filter by it.</p>
+      ${noDesc ? raw(html`<p class="hint">${noDesc} job${noDesc === 1 ? " can't" : "s can't"} be picked because ${noDesc === 1 ? "it has" : "they have"} no description yet. Fill ${noDesc === 1 ? "it" : "them"} in from the Bulk tab on Add job.</p>`) : ""}
       <div class="actions">
         ${n.running
           ? raw('<button class="btn" id="n-stop">Stop the run</button>')
@@ -1203,20 +1260,7 @@ async function drawNightly(box) {
   box.querySelector("#n-time").addEventListener("change", (e) => e.target.value && save({ run_time: e.target.value }));
   box.querySelector("#n-engine").addEventListener("change", (e) => save({ engine: e.target.value }));
   box.querySelectorAll("[data-opt]").forEach((c) => c.addEventListener("change", () => save({ [c.dataset.opt]: c.checked })));
-  const queue = async (ids, queued) => {
-    try {
-      const r = await api("/nightly/queue", { json: { job_ids: ids, queued } });
-      state.jobs.forEach((j) => { if (ids.includes(j.id) && (!queued || j.has_description)) j.queued = queued; });
-      box.querySelectorAll("[data-q]").forEach((c) => { c.checked = !!state.jobs.find((j) => j.id === Number(c.dataset.q))?.queued; });
-      box.querySelector("#n-sum").innerHTML = pendingText(r.pending);
-      const run = box.querySelector("#n-run");
-      if (run) run.disabled = !r.pending.jobs;
-    } catch (e) { toast(e.message, "error"); }
-  };
-  box.querySelectorAll("[data-q]").forEach((c) => c.addEventListener("change", () => queue([Number(c.dataset.q)], c.checked)));
-  box.querySelector("#n-pick-new")?.addEventListener("click", () =>
-    queue(pickable.filter((j) => j.status === "saved" && !j.has_resume).map((j) => j.id), true));
-  box.querySelector("#n-clear")?.addEventListener("click", () => queue(pickable.map((j) => j.id), false));
+  box.querySelector("#n-pick").addEventListener("click", () => { state.filter = "tonight"; localSet("jh.filter", "tonight"); });
   box.querySelector("#n-run")?.addEventListener("click", async () => {
     try { await api("/nightly/run", { method: "POST" }); toast("Started"); setTimeout(() => drawNightly(box), 800); }
     catch (e) { toast(e.message, "error"); }
@@ -1229,7 +1273,7 @@ async function drawNightly(box) {
 }
 
 function pendingText(p) {
-  if (!p.queued) return "Empty. Tick the jobs below, or use “Add to tonight's list” on a job.";
+  if (!p.queued) return "Empty. Tick jobs in the Tonight column on the job list, or use “Add to tonight's list” on a job.";
   const parts = [p.resume && `${p.resume} resume${p.resume === 1 ? "" : "s"}`, p.fit && `${p.fit} fit check${p.fit === 1 ? "" : "s"}`,
     p.cover_letter && `${p.cover_letter} cover letter${p.cover_letter === 1 ? "" : "s"}`].filter(Boolean);
   return esc(`${p.queued} job${p.queued === 1 ? "" : "s"} picked. `) +
