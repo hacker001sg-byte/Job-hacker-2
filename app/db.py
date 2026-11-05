@@ -4,7 +4,9 @@ from sqlalchemy import (
     Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint,
     create_engine, event,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker, validates
+
+from .dates import normalize as normalize_date
 
 from .config import DATABASE_URL
 
@@ -90,6 +92,13 @@ class Job(Base):
     updated_at: Mapped[dt.datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
     user = relationship("User", back_populates="jobs")
+
+    @validates("posted_date")
+    def _clean_posted(self, _key, value):
+        # Store one format (YYYY-MM-DD) whatever the source wrote; "3 days ago"
+        # is counted back from when the job was saved.
+        return normalize_date(value, self.created_at or now())
+
     documents = relationship(
         "Document", back_populates="job", cascade="all, delete-orphan",
         order_by="Document.created_at.desc()",
@@ -159,9 +168,27 @@ def _migrate():
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}"))
 
 
+def _fix_posted_dates():
+    """Older versions stored posted dates as written ("2026-04-27T00:00:00.000Z",
+    "3 days ago"). Rewrite them as YYYY-MM-DD with plain SQL, so the jobs'
+    "updated" time isn't touched."""
+    from sqlalchemy import text
+    with engine.begin() as conn:
+        rows = conn.execute(text(
+            "SELECT id, posted_date, created_at FROM jobs WHERE posted_date != '' "
+            "AND (length(posted_date) != 10 OR posted_date NOT LIKE '____-__-__')")).fetchall()
+        for jid, raw, created in rows:
+            ref = created if isinstance(created, dt.datetime) else (
+                dt.datetime.fromisoformat(str(created)) if created else None)
+            fixed = normalize_date(raw, ref)
+            if fixed != raw:
+                conn.execute(text("UPDATE jobs SET posted_date = :d WHERE id = :i"), {"d": fixed, "i": jid})
+
+
 def init_db():
     Base.metadata.create_all(engine)
     _migrate()
+    _fix_posted_dates()
     with SessionLocal() as s:
         if not s.query(User).first():
             s.add(User(name="Me"))

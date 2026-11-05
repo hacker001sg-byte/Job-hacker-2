@@ -83,6 +83,16 @@ function ago(iso) {
   if (d < 60) return `${d}d`;
   return `${Math.floor(d / 30)}mo`;
 }
+const isoDate = (s) => (/^\d{4}-\d{2}-\d{2}$/.test(s || "") ? s : "");
+// "27 Apr" this year, "27 Apr 2025" otherwise; text that isn't a date is shown as is.
+function fmtPosted(s, long = false) {
+  if (!isoDate(s)) return s || "";
+  const d = new Date(s + "T00:00:00");
+  if (long) return d.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+  // earlier years: month and year is enough in a list ("Dec 2025")
+  if (d.getFullYear() !== new Date().getFullYear()) return d.toLocaleDateString(undefined, { month: "short", year: "numeric" });
+  return d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+}
 function longDate(iso) {
   return iso ? new Date(iso).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "";
 }
@@ -317,7 +327,7 @@ async function renderList(keep = false) {
   $main.querySelectorAll("[data-sort]").forEach((b) => b.addEventListener("click", () => {
     const k = b.dataset.sort;
     if (state.sort === k) state.dir = state.dir === "asc" ? "desc" : "asc";
-    else { state.sort = k; state.dir = ["updated", "fit"].includes(k) ? "desc" : "asc"; }
+    else { state.sort = k; state.dir = ["updated", "fit", "posted"].includes(k) ? "desc" : "asc"; }
     localSet("jh.sort", state.sort); localSet("jh.dir", state.dir);
     renderList(true);
   }));
@@ -350,6 +360,7 @@ const SHEET_COLS = [
   { cls: "c-loc", label: "Location" },
   { cls: "c-fit num", label: "Fit", sort: "fit" },
   { cls: "c-res", label: "Resume" },
+  { cls: "c-post num", label: "Posted", sort: "posted" },
   { cls: "c-upd num", label: "Updated", sort: "updated" },
 ];
 const STAGE_ORDER = Object.fromEntries(STAGES.map((s, i) => [s.id, i]));
@@ -367,6 +378,8 @@ function drawRows() {
   const cmp = {
     updated: (a, b) => (a.updated_at || "").localeCompare(b.updated_at || ""),
     fit: (a, b) => (a.fit_score ?? -1) - (b.fit_score ?? -1),
+    // undated jobs sort as oldest, so newest postings come first
+    posted: (a, b) => (isoDate(a.posted_date) || "0").localeCompare(isoDate(b.posted_date) || "0"),
     company: (a, b) => txt(a.company, b.company) || txt(a.title, b.title),
     title: (a, b) => txt(a.title, b.title),
     stage: (a, b) => STAGE_ORDER[a.status] - STAGE_ORDER[b.status] || (b.updated_at || "").localeCompare(a.updated_at || ""),
@@ -395,7 +408,8 @@ function drawRows() {
       <td class="c-loc">${j.location || ""}</td>
       <td class="c-fit num">${j.fit_score ? raw(html`<span class="fitn" style="--fc:${raw(fitColor(j.fit_score))}" aria-label="Fit ${j.fit_score} out of 10">${j.fit_score}</span>`) : raw('<span class="nil">–</span>')}</td>
       <td class="c-res">${j.has_resume ? raw('<span class="flag ok">Ready</span>') : ""}${j.queued ? raw('<span class="flag night">Tonight</span>') : ""}${!j.has_resume && !j.queued ? raw('<span class="nil">–</span>') : ""}</td>
-      <td class="c-upd num" title="${longDate(j.updated_at)}">${ago(j.updated_at)}</td>
+      <td class="c-post num" title="${j.posted_date ? `Posted ${fmtPosted(j.posted_date, true)}` : "Posting date unknown"}">${j.posted_date ? fmtPosted(j.posted_date) : raw('<span class="nil">–</span>')}</td>
+      <td class="c-upd num" title="Changed in the app ${longDate(j.updated_at)}">${ago(j.updated_at)}</td>
     </tr>`).join("");
 }
 
@@ -708,7 +722,7 @@ function showReview(draft, note) {
 async function renderJob(id) {
   const j = await api(`/jobs/${id}`);
   const personas = state.session.ai_enabled ? await api("/personas") : [];
-  const facts = [["Location", j.location], ["Salary", j.salary], ["Job type", j.employment_type], ["Posted", j.posted_date], ["Saved", longDate(j.created_at)]].filter(([, v]) => v);
+  const facts = [["Location", j.location], ["Salary", j.salary], ["Job type", j.employment_type], ["Posted", fmtPosted(j.posted_date, true)], ["Saved", longDate(j.created_at)]].filter(([, v]) => v);
   const desc = j.description || "";
 
   setView(html`

@@ -234,11 +234,13 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 
 .c-stage { width: 178px; }
 .c-job { width: auto; }
-.c-co { width: 19%; }
-.c-loc { width: 15%; }
+.c-co { width: 15%; }
+.c-loc { width: 12%; }
 .c-fit { width: 58px; }
-.c-res { width: 150px; }
+.c-res { width: 136px; }
 .c-upd { width: 82px; }
+.c-post { width: 104px; }
+.sheet td.c-post { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .sheet td.c-co, .sheet td.c-loc { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sheet td.c-upd { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
@@ -268,11 +270,11 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 /* phone: two-line rows, fewer columns */
 @media (max-width: 719px) {
   .sheet-wrap { border-radius: var(--radius-s); margin: 0 calc(var(--gutter) * -0.5); }
-  .c-stage, .c-co, .c-loc, .c-res { display: none; }
+  .c-stage, .c-co, .c-loc, .c-res, .c-upd { display: none; }
   .sheet th, .sheet td { padding: 9px 10px; }
   .sheet thead th { font-size: 13px; }
   .c-fit { width: 46px; }
-  .c-upd { width: 88px; }
+  .c-post { width: 92px; }
   .st-dot.m { display: inline-block; }
   .c-job .sub, .c-job .m-tags { display: block; }
   .c-job .sub { margin-left: 17px; }

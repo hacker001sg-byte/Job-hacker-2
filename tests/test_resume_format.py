@@ -47,3 +47,20 @@ def test_plain_and_docx():
     assert "PROFESSIONAL EXPERIENCE" in plain and "• Did things" in plain and "**" not in plain and "#" not in plain
     assert to_docx(sort_experience(MD), "resume")[:2] == b"PK"
     assert to_docx("Dear team,\n\nI'd love to help.\n\nBest,\nJane", "cover_letter")[:2] == b"PK"
+
+
+def test_posted_date_normalize():
+    import datetime as dt
+    from app.dates import normalize
+    ref = dt.date(2026, 11, 5)
+    assert normalize("2026-04-27T00:00:00.000Z") == "2026-04-27"
+    assert normalize("2026-04-27") == "2026-04-27"
+    assert normalize("27 Apr 2026") == "2026-04-27"
+    assert normalize("Apr 27, 2026") == "2026-04-27"
+    assert normalize("27/04/2026") == "2026-04-27"
+    assert normalize("3 days ago", ref) == "2026-11-02"
+    assert normalize("2 weeks ago", ref) == "2026-10-22"
+    assert normalize("a month ago", ref) == "2026-10-06"
+    assert normalize("5 hours ago", ref) == "2026-11-05"
+    assert normalize("Reposted 1 day ago", ref) == "2026-11-04"
+    assert normalize("") == "" and normalize("sometime") == "sometime"

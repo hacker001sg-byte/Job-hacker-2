@@ -284,3 +284,28 @@ def test_nightly_settings_and_run(c, monkeypatch):
     assert last["failed"] >= 1 and c.get(f"/api/jobs/{other['id']}").json()["queued"] is True
     c.post("/api/nightly/queue", json={"job_ids": [other["id"]], "queued": False})
     c.patch("/api/nightly", json={"enabled": False})
+
+
+def test_csv_published_at_becomes_posted_date(c):
+    csv_text = ("Company Name,Job URL,Job title,Location,Published At,Status\n"
+                "Acme,https://sg.linkedin.com/jobs/view/dated-role-5550001,Dated Role,Singapore,2026-04-27T00:00:00.000Z,Abandon\n")
+    assert c.post("/api/import/csv", files={"file": ("n.csv", csv_text, "text/csv")}).json()["added"] == 1
+    j = next(x for x in c.get("/api/jobs").json() if x["title"] == "Dated Role")
+    assert j["posted_date"] == "2026-04-27" and j["status"] == "closed"
+    r = c.post("/api/jobs", json={"title": "Relative", "posted_date": "3 days ago"}).json()
+    assert len(r["posted_date"]) == 10 and r["posted_date"][4] == "-"
+
+
+def test_old_posted_dates_are_fixed_on_startup():
+    from sqlalchemy import text
+    from app import db
+    with db.engine.begin() as conn:
+        uid = conn.execute(text("SELECT id FROM users LIMIT 1")).scalar()
+        conn.execute(text("INSERT INTO jobs (user_id, title, company, location, salary, employment_type, posted_date, "
+                          "description, source, status, tags, notes, fit_json, queued, created_at, updated_at) VALUES "
+                          "(:u, 'Legacy', '', '', '', '', '2025-12-01T00:00:00.000Z', '', 'csv', 'saved', '', '', '', 0, "
+                          "'2026-01-01 00:00:00', '2026-01-02 00:00:00')"), {"u": uid})
+    db._fix_posted_dates()
+    with db.engine.begin() as conn:
+        row = conn.execute(text("SELECT posted_date, updated_at FROM jobs WHERE title = 'Legacy'")).one()
+    assert row[0] == "2025-12-01" and str(row[1]).startswith("2026-01-02")
