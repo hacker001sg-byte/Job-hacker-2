@@ -1,6 +1,6 @@
 services:
   jobhacker:
-    image: ghcr.io/hacker001sg-byte/job-hacker-2:latest
+    image: ghcr.io/thisisyazid/job-hacker-2:latest
     build: .
     container_name: jobhacker
     restart: unless-stopped

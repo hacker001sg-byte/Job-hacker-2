@@ -31,12 +31,12 @@ To build locally instead of pulling the published image: `docker compose up -d -
 1. Install Podman Desktop (or Docker Desktop) and start the machine.
 2. Get the files:
    ```sh
-   git clone https://github.com/hacker001sg-byte/Job-hacker-2.git && cd Job-hacker-2
+   git clone https://github.com/thisisyazid/Job-hacker-2.git && cd Job-hacker-2
    cp .env.example .env && nano .env
    ```
-3. GitHub Actions publishes `ghcr.io/hacker001sg-byte/job-hacker-2:latest` for both Intel and Apple Silicon. Either make the package public (GitHub → your profile → Packages → job-hacker-2 → Package settings → Change visibility) or log in once:
+3. GitHub Actions publishes `ghcr.io/thisisyazid/job-hacker-2:latest` for both Intel and Apple Silicon. Either make the package public (GitHub → your profile → Packages → job-hacker-2 → Package settings → Change visibility) or log in once:
    ```sh
-   podman login ghcr.io -u hacker001sg-byte   # password: a GitHub token with read:packages
+   podman login ghcr.io -u thisisyazid   # password: a GitHub token with read:packages
    ```
 4. Start it: `podman compose up -d`
 5. Expose it the same way as the quiz app: add a Cloudflare Tunnel public hostname pointing at `http://localhost:8080`. Keep `APP_PASSWORD` set whenever it's reachable from outside.
@@ -58,7 +58,7 @@ If that prints your models, the Local option appears in the app. If not, Setting
 On the machine running the old job-tracker:
 
 ```sh
-curl -O https://raw.githubusercontent.com/hacker001sg-byte/Job-hacker-2/main/scripts/export_old_tracker.py
+curl -O https://raw.githubusercontent.com/thisisyazid/Job-hacker-2/main/scripts/export_old_tracker.py
 podman exec -i $(podman ps --format '{{.Names}}' | grep backend) python - < export_old_tracker.py > old-tracker.json
 ```
 
