@@ -274,6 +274,17 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .dead-callout { display: flex; align-items: center; justify-content: space-between; gap: 8px 16px; flex-wrap: wrap; padding: 10px 14px; margin-bottom: 12px; }
 .dead-callout p { margin: 0; }
 
+/* tablet (iPad): the fixed-width columns would squeeze Job to zero, hiding the title link.
+   Drop the less important columns and show Resume/Tonight flags under the title instead. */
+@media (min-width: 720px) and (max-width: 1099px) {
+  .c-res, .c-upd { display: none; }
+  .c-job .m-tags { display: block; }
+}
+@media (min-width: 720px) and (max-width: 899px) {
+  .c-loc { display: none; }
+  .c-stage { width: 150px; }
+}
+
 /* phone: two-line rows, fewer columns */
 @media (max-width: 719px) {
   .sheet-wrap { border-radius: var(--radius-s); margin: 0 calc(var(--gutter) * -0.5); }
